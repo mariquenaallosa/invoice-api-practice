@@ -250,7 +250,9 @@ class Invoice(Base):
     customer_name: Mapped[str] = mapped_column(String(120), nullable=False)
     customer_email: Mapped[str] = mapped_column(String(255), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD", server_default="USD")
+    currency: Mapped[str] = mapped_column(
+        String(3), nullable=False, default="USD", server_default="USD"
+    )
     status: Mapped[InvoiceStatus] = mapped_column(
         Enum(InvoiceStatus, native_enum=False, validate_strings=True, length=10),
         nullable=False,
@@ -989,12 +991,18 @@ def create_app() -> FastAPI:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         details = [
-            {"loc": list(error.get("loc", [])), "msg": error.get("msg", ""), "type": error.get("type", "")}
+            {
+                "loc": list(error.get("loc", [])),
+                "msg": error.get("msg", ""),
+                "type": error.get("type", ""),
+            }
             for error in exc.errors()
         ]
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=error_payload("validation_error", "Request payload failed validation.", details),
+            content=error_payload(
+                "validation_error", "Request payload failed validation.", details
+            ),
         )
 
     @application.exception_handler(IntegrityError)
