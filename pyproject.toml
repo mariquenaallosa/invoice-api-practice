@@ -38,7 +38,10 @@ line-length = 100
 target-version = "py312"
 # Alembic migrations are machine-generated. Linting them adds noise and fights
 # with `alembic revision --autogenerate`, so they are excluded on purpose.
-extend-exclude = ["alembic/versions"]
+# Markdown is excluded because ruff formats Python blocks inside .md files,
+# which would silently rewrite documentation and make `ruff format --check`
+# fail on prose edits.
+extend-exclude = ["alembic/versions", "*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "C4", "RUF"]
