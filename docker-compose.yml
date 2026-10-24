@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: invoice
+      POSTGRES_PASSWORD: invoice
+      POSTGRES_DB: invoice
+    ports:
+      # 5433 on the host so it does not clash with other local Postgres instances.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates the `invoice_test` database on first initialization.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invoice -d invoice"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  migrate:
+    build:
+      context: .
+    # One-shot job: applies the schema and exits. It is not a long running
+    # service, so `api` waits for it to finish successfully.
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://invoice:invoice@postgres:5432/invoice
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+    environment:
+      DATABASE_URL: postgresql+psycopg://invoice:invoice@postgres:5432/invoice
+      APP_ENV: development
+      LOG_LEVEL: INFO
+    ports:
+      # 8010 on the host because port 8000 is often taken by another local app.
+      - "8010:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
