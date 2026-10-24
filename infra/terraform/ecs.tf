@@ -93,7 +93,7 @@ resource "aws_ecs_task_definition" "app" {
         },
         {
           name  = "DATABASE_URL"
-          value = "postgresql+psycopg://invoice:invoice@postgres:5432/invoice"
+          value = var.database_url
         }
       ]
       healthCheck = {
