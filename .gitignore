@@ -19,7 +19,7 @@ crash.log
 
 # Artefactos de proceso del orquestador: se conservan en el disco local
 # pero no forman parte del repositorio publico.
-docs/
+docs/superpowers/
 odd/
 
 # Local state of the Floci emulator (optional, aws-emulator profile).
