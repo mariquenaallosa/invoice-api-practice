@@ -117,3 +117,21 @@ jobs:
         run: terraform init -backend=false -input=false
       - name: Terraform validate
         run: terraform validate
+      - name: Terraform test
+        run: terraform test
+      - name: Check the environment tfvars files
+        run: |
+          for environment in dev staging prod; do
+            file="environments/${environment}.tfvars"
+            output=$(echo 'var.environment' | terraform console -var-file="$file" 2>&1) || {
+              echo "$output"
+              echo "::error::$file is not a valid variable file"
+              exit 1
+            }
+            if echo "$output" | grep -q "Warning"; then
+              echo "$output"
+              echo "::error::$file declares variables that the module does not know"
+              exit 1
+            fi
+            echo "$file -> $output"
+          done
