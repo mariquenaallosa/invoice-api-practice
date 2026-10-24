@@ -220,6 +220,10 @@ Verificado: el `init` inicializa el backend contra el emulador, el `apply` crea
 los recursos y el state file termina en el bucket de S3 con la tabla de DynamoDB
 haciendo de lock.
 
+> Este demo usa el backend **S3** (el mecanismo de producción) sobre el
+> emulador. El flujo del ambiente `staging` de la [sección 9](#9-practicar-localmente-con-floci)
+> usa el backend local con un state por ambiente, que es más simple de probar.
+
 ---
 
 ## 5. Variables y ambientes
@@ -405,7 +409,7 @@ cartera.
 ### Puesta en marcha
 
 El emulador es un servicio del `docker-compose.yml` del proyecto, detrás de un
-profile para que no arranque con el stack normal:
+profile para que no arranque con el stack de development:
 
 ```bash
 # 1. Levantar el emulador
@@ -420,19 +424,24 @@ export AWS_REGION=us-east-1
 # 3. La contraseña de la base, que se usa para armar el secreto
 export TF_VAR_database_password="una-password-de-prueba"
 
-# 4. Estado separado del de AWS real
-terraform init -reconfigure -backend-config="path=floci.tfstate"
+# 4. Estado separado del de AWS real y del de development
+terraform init -reconfigure -backend-config="path=floci.staging.tfstate" -input=false
 
 # 5. Aplicar
-terraform apply -auto-approve -var-file=environments/dev.tfvars -var image_tag=v1
+terraform apply -auto-approve -var-file=environments/staging.tfvars -var image_tag=v1
 ```
 
 El `AWS_ENDPOINT_URL` es la clave: el provider de AWS v6 lo respeta y redirige
 todas las llamadas al emulador, sin tocar la configuración del provider.
 
-> El paso 4 importa. El estado del emulador vive en `floci.tfstate` y el de AWS
-> real en `terraform.tfstate`. Mezclarlos hace que Terraform crea que los
-> recursos ya existen y falle con `RepositoryAlreadyExistsException`.
+> El paso 4 importa por dos razones. El estado del emulador vive en
+> `floci.staging.tfstate` y el de AWS real en `terraform.tfstate`: mezclarlos hace
+> que Terraform crea que los recursos ya existen y falle con
+> `RepositoryAlreadyExistsException`. Y cada ambiente necesita su propio estado,
+> porque los nombres de los recursos llevan el ambiente: con un estado
+> compartido, aplicar `staging` **destruiría** los recursos de `development`. En
+> producción esto es el mismo concepto con otra mecánica: un state por ambiente,
+> en distintas claves del bucket S3.
 
 ### Publicar la imagen
 
@@ -552,4 +561,4 @@ terraform init -reconfigure
 ```
 
 Esto vuelve a apuntar al backend `local` con `terraform.tfstate`. El estado del
-emulador queda en `floci.tfstate`, que también está en `.gitignore`.
+emulador queda en `floci.staging.tfstate`, que también está en `.gitignore`.

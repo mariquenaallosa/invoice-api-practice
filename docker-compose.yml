@@ -1,4 +1,20 @@
+# Two environments live in this file, and they are not the same thing.
+#
+#   development  the default stack: a local PostgreSQL, the migrations and the
+#                API running in containers or on your machine. No Terraform.
+#
+#   staging      the AWS emulator (Floci) plus the Terraform configuration
+#                applied against it. The database is the emulated RDS, not the
+#                local PostgreSQL, so the local one is not needed.
+#
+# The staging services live behind a profile, so a plain `docker compose up`
+# never starts them:
+#
+#   make dev      # development: local database and API
+#   make staging  # staging: the emulator, then Terraform against it
+
 services:
+  # ------------------------------------------------------------- development
   postgres:
     image: postgres:16-alpine
     environment:
@@ -48,12 +64,11 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # ----------------------------------------------------------------- staging
   floci:
     image: floci/floci:latest
-    # Optional local AWS emulator, used to practice the Terraform configuration
-    # without an AWS account. It lives behind a profile so it does not start
-    # with the normal stack:
-    #   docker compose --profile aws-emulator up -d floci
+    # The AWS emulator. It provides the control plane (ECR, ECS, IAM, RDS,
+    # Secrets Manager) that the staging environment runs on.
     profiles: ["aws-emulator"]
     ports:
       - "4566:4566"

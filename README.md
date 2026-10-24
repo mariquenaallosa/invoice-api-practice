@@ -137,7 +137,41 @@ make emulator    # el emulador de AWS local
 
 ---
 
-## 3. Ejecutar localmente
+## 3. Los dos ambientes
+
+El proyecto tiene dos ambientes, y **no son la misma cosa con distinto
+nombre**: se levantan distinto y resolvuen distinto.
+
+| | **development** | **staging** |
+|---|---|---|
+| Base de datos | PostgreSQL local (compose, puerto 5433) | **RDS emulado** (Floci) |
+| API | Tu máquina, o un container | Una **task de ECS** dentro del emulador |
+| Terraform | **No se aplica** | **Se aplica** contra el emulador |
+| Estado | `floci.dev.tfstate` | `floci.staging.tfstate` |
+| Comandos | `make dev` | `make staging` |
+
+La consecuencia práctica: en development **no tocás Terraform**. La app corre
+contra una base de datos local y el código se prueba con `pytest`. En staging
+corre la infraestructura completa —VPC, ALB, RDS, Secrets Manager, ECS— y la API
+se despliega como una task que resuelve su secreto de verdad.
+
+Cada ambiente tiene **su propio state de Terraform**. Sin eso, aplicar staging
+destruiría los recursos de development: los nombres llevan el ambiente
+(`invoice-api-practice-dev` vs `invoice-api-practice-staging`) y Terraform
+compara el código contra el state, no contra los recursos que existen.
+
+En producción esto es el mismo concepto con otro mecanismo: **un state por
+ambiente**, en distintas claves del bucket S3.
+
+```bash
+make help          # todos los comandos, con su descripción
+make dev           # development: base local + migraciones
+make staging       # staging: el emulador de AWS
+```
+
+---
+
+## 4. Ejecutar localmente
 
 Requisitos: Python 3.12 y [uv](https://docs.astral.sh/uv/). Docker solo hace falta para
 la base de datos.
@@ -159,6 +193,14 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload --port 8010
 ```
 
+O, lo mismo con los atajos del `Makefile`:
+
+```bash
+make install    # paso 1
+make dev        # pasos 3 y 4
+make dev-api    # paso 5
+```
+
 La API queda en <http://localhost:8010> y la documentación en
 <http://localhost:8010/docs>.
 
@@ -174,7 +216,10 @@ docker compose down
 
 ---
 
-## 4. Ejecutar con Docker Compose
+## 5. Ejecutar con Docker Compose
+
+Esto es el stack de **development**: la base de datos local y la API en
+contenedores.
 
 ```bash
 docker compose up --build
@@ -206,9 +251,17 @@ docker compose down -v     # -v borra también el volumen de datos
 > `Ctrl+C` para detenerlo, o `docker compose up --build -d` para correrlo en segundo
 > plano.
 
+El cuarto servicio, `floci`, es el emulador de AWS y **está detrás de un
+profile**, así que este comando nunca lo levanta. Es el que usa el ambiente
+`staging`:
+
+```bash
+make staging    # solo el emulador
+```
+
 ---
 
-## 5. Tests
+## 6. Tests
 
 ```bash
 uv run pytest                                   # toda la suite
@@ -251,7 +304,7 @@ de una transacción que se revierte al terminar, aunque el código del test haga
 
 ---
 
-## 6. Swagger
+## 7. Swagger
 
 Con la API levantada:
 
@@ -265,7 +318,7 @@ En local y en Docker Compose la API escucha en el mismo puerto.
 
 ---
 
-## 7. Decisiones técnicas
+## 8. Decisiones técnicas
 
 | Decisión | Alternativa descartada | Por qué |
 |---|---|---|
@@ -302,7 +355,7 @@ En local y en Docker Compose la API escucha en el mismo puerto.
 
 ---
 
-## 8. Qué es práctica real y qué es práctica personal
+## 9. Qué es práctica real y qué es práctica personal
 
 Esta sección es deliberadamente honesta, porque el valor de este repositorio está en
 que se pueda defender cada línea.
@@ -347,7 +400,7 @@ pequeño a propósito es una decisión, no una limitación.
 
 ---
 
-## 9. Terraform
+## 10. Terraform
 
 La infraestructura completa de la API en AWS: VPC con subnets públicas y
 privadas, NAT Gateway, security groups, ALB, ECR, ECS (cluster, service y dos
@@ -355,7 +408,7 @@ task definitions), RDS PostgreSQL y Secrets Manager. **33 recursos**, declarados
 en `infra/terraform/`.
 
 Lo que se aplicó y lo que no, está detallado en la
-[sección de honestidad](#8-qué-es-práctica-real-y-qué-es-práctica-personal).
+[sección de honestidad](#9-qué-es-práctica-real-y-qué-es-práctica-personal).
 
 ### Lo esencial para entenderla
 
@@ -381,6 +434,26 @@ Lo que se aplicó y lo que no, está detallado en la
 | Saber qué archivo hace qué y cuánto cuesta | [`infra/terraform/README.md`](infra/terraform/README.md) |
 | Practicar la infraestructura completa sin cuenta de AWS | [`infra/terraform/README.md` §9](infra/terraform/README.md#9-practicar-localmente-con-floci) |
 
+### El flujo del ambiente staging
+
+```bash
+make staging        # 1. levanta el emulador
+make staging-init   # 2. state propio de staging
+make staging-apply  # 3. aplica los 33 recursos
+make staging-image  # 4. publica la imagen en el ECR emulado
+make staging-deploy # 5. actualiza la task definition con el tag nuevo
+```
+
+Los pasos 3 a 5 necesitan las variables de entorno del emulador:
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_REGION=us-east-1
+export TF_VAR_database_password="una-password-de-prueba"
+```
+
 ### Costo real
 
 Con el stack completo corriendo 24/7: **~USD 72 por mes** (NAT Gateway ~32, ALB
@@ -388,7 +461,7 @@ Con el stack completo corriendo 24/7: **~USD 72 por mes** (NAT Gateway ~32, ALB
 balanceador no los elimina: hay que borrarlos. El detalle por recurso está en
 el [README de infra](infra/terraform/README.md#7-riesgo-de-costo).
 
-## 10. Qué preguntas de entrevista permite practicar
+## 11. Qué preguntas de entrevista permite practicar
 
 Cada pregunta apunta a una decisión concreta de este repositorio.
 
@@ -434,7 +507,7 @@ Cada pregunta apunta a una decisión concreta de este repositorio.
 
 ---
 
-## 11. Pipeline de CI
+## 12. Pipeline de CI
 
 `.github/workflows/ci.yml` corre en cada push y pull request a `main`, con cuatro jobs
 independientes:

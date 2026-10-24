@@ -159,6 +159,29 @@ configuraciones**. Un error muy común es tener el mismo bucket de S3 para
 `dev` y `prod` en dos workspaces distintos: cada uno tiene su state, cada uno
 cree que el bucket no existe, y el segundo apply falla o lo destruye.
 
+### Un state por ambiente
+
+Este proyecto tiene dos ambientes que **conviven**: `development` (la base
+local, sin Terraform) y `staging` (la infraestructura completa contra el
+emulador). Cada uno tiene su propio archivo de state
+(`floci.staging.tfstate`, `floci.dev.tfstate`), y por eso aplicar uno no
+toca los recursos del otro.
+
+El motivo es concreto y no es un detalle de estilo: **los nombres de los
+recursos llevan el ambiente** (`invoice-api-practice-staging-db` vs
+`invoice-api-practice-dev-db`). Terraform compara el código contra el state,
+no contra lo que existe en la nube. Con un único state compartido, aplicar
+`staging` propondría **destruir** todo lo de `development`, porque para
+Terraform esos recursos sencillamente no existen.
+
+En producción es el mismo concepto con otra mecánica: **una clave distinta en
+el bucket S3 por ambiente** (`infra/staging/terraform.tfstate`,
+`infra/prod/terraform.tfstate`), y a veces un bucket distinto.
+
+Una consecuencia que conviene tener presente: con un state por ambiente, el
+`plan` de cada uno se calcula **por separado**. No hay un comando que muestre
+"todo lo que van a crear los tres ambientes" en un solo lugar.
+
 ### Módulos
 
 Un módulo es un directorio de `.tf` reutilizable. Se consume con `source`:
