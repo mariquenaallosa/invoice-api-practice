@@ -6,7 +6,7 @@
 > ni `terraform plan` contra AWS.
 >
 > Lo que **sí** se hizo fue aplicarla contra **[Floci](https://floci.io/aws/)**, un
-> emulador local de AWS que corre en Docker: los 7 recursos se crearon de verdad
+> emulador local de AWS que corre en Docker: los 33 recursos se crearon de verdad
 > contra una API compatible con AWS, y una task de ECS llegó a levantar el
 > contenedor de la API. Ver [Practicar localmente con Floci](#9-practicar-localmente-con-floci).
 >
@@ -228,21 +228,68 @@ tabla de DynamoDB haciendo de lock.
 
 ## 5. Recursos que crea esta configuración
 
+**Red**
+
+| Recurso | Tipo Terraform | Propósito |
+|---|---|---|
+| `10.0.0.0/16` | `aws_vpc.main` | VPC con DNS habilitado. |
+| — | `aws_internet_gateway.main` | Salida a internet desde las subnets públicas. |
+| 2 × públicas | `aws_subnet.public` | Una por zona de disponibilidad, con IP pública. |
+| 2 × privadas | `aws_subnet.private` | Una por zona, sin IP pública: ahí corren las tasks. |
+| — | `aws_nat_gateway.main` + `aws_eip.nat` | Salida a internet de las tasks (para pull de ECR). |
+| 2 | `aws_route_table.*` + asociaciones | Rutas pública (IGW) y privada (NAT). |
+| 3 | `aws_security_group.*` | ALB (público), tasks (solo del ALB) y base (solo de las tasks). |
+
+**Aplicación**
+
 | Recurso | Tipo Terraform | Propósito |
 |---|---|---|
 | `<project>-<env>` | `aws_ecr_repository.app` | Repositorio de imágenes Docker (tags inmutables, escaneo en push). |
 | — | `aws_ecr_lifecycle_policy.app` | Conserva las últimas 10 imágenes y expira las no etiquetadas a los 7 días. |
 | `<project>-<env>` | `aws_ecs_cluster.main` | Cluster ECS (Fargate) con Container Insights deshabilitado. |
 | `<project>-<env>-task-execution` | `aws_iam_role.task_execution` | Rol que asume `ecs-tasks.amazonaws.com`. |
-| — | `aws_iam_role_policy.task_execution` | Política inline: logs, `ecr:GetAuthorizationToken` y descarga de capas de ECR. |
+| — | `aws_iam_role_policy.task_execution` | Inline: logs, ECR y `secretsmanager:GetSecretValue`. |
 | `/ecs/<project>-<env>` | `aws_cloudwatch_log_group.app` | Logs del contenedor, con retención de 14 días. |
-| `<project>-<env>` | `aws_ecs_task_definition.app` | Task definition de Fargate (256 CPU / 512 MiB) con healthcheck en `/health`. |
+| `<project>-<env>` | `aws_ecs_task_definition.app` | Task definition de la API (256 CPU / 512 MiB) con healthcheck en `/health`. |
+| `<project>-<env>-migrate` | `aws_ecs_task_definition.migrate` | La misma imagen, pero corre `alembic upgrade head`. |
+| `<project>-<env>-api` | `aws_ecs_service.api` | Mantiene las tasks corriendo y las registra en el target group. |
 
-**No crea** y **no ejecuta**: VPC, subnets, NAT Gateway, Internet Gateway, ALB,
-RDS/PostgreSQL, ni ninguna task en ejecución. La task definition existe, pero
-**no hay ningún `aws_ecs_service`** que la levante: correr la API en AWS
-requeriría primero una red (VPC + subnets) y una base de datos, y eso ya sale
-del alcance de este ejercicio.
+**Entrada**
+
+| Recurso | Tipo Terraform | Propósito |
+|---|---|---|
+| `<project>-<env>` | `aws_lb.main` | Application Load Balancer en las subnets públicas. |
+| `<project>-<env>-api` | `aws_lb_target_group.api` | Target group con health check en `/health`. |
+| puerto 80 | `aws_lb_listener.http` | Reenvía todo al target group. |
+
+**Datos y secretos**
+
+| Recurso | Tipo Terraform | Propósito |
+|---|---|---|
+| `<project>-<env>-db` | `aws_db_subnet_group.main` | Subnets privadas donde vive la base. |
+| `<project>-<env>-db` | `aws_db_instance.main` | PostgreSQL gestionado, no accesible desde internet. |
+| `<project>-<env>/database` | `aws_secretsmanager_secret.database` | Credenciales de la base, como JSON. |
+| — | `aws_secretsmanager_secret_version.database` | La versión con user, password, host, port y dbname. |
+
+### El orden del despliegue
+
+La API no puede arrancar contra una base sin esquema. El orden correcto es:
+
+1. `terraform apply` — crea la infraestructura y registra las task definitions.
+2. Correr la **task de migración** y esperar a que termine bien.
+3. Mover el **service** a la task definition nueva.
+
+```bash
+aws ecs run-task --cluster <cluster> --task-definition <project>-<env>-migrate \
+  --launch-type FARGATE --count 1 --network-configuration '...'
+# esperá a que lastStatus sea STOPPED y exitCode 0
+
+aws ecs update-service --cluster <cluster> --service <project>-<env>-api \
+  --task-definition <project>-<env>
+```
+
+Migrar desde el entrypoint de la API sería un error: correría una migración por
+réplica, y con un despliegue rolling eso son varias migraciones concurrentes.
 
 ## 6. Variables de entrada y ambientes
 
@@ -251,7 +298,19 @@ del alcance de este ejercicio.
 | `aws_region` | `string` | `us-east-1` | Región donde se crean los recursos. |
 | `project_name` | `string` | `invoice-api-practice` | Prefijo de los nombres de recursos. |
 | `environment` | `string` | **sin default (obligatoria)** | Validado: solo `dev`, `staging` o `prod`. Ver abajo. |
-| `database_url` | `string` (sensitive) | **sin default (obligatoria)** | Connection string del contenedor. Llega por `TF_VAR_database_url`. |
+| `image_tag` | `string` | `latest` | Tag de la imagen. El repo ECR es inmutable, así que **tiene que cambiar en cada despliegue** (en un pipeline real, el SHA del commit). |
+| `database_password` | `string` (sensitive) | **sin default (obligatoria)** | Contraseña de la base. Llega por `TF_VAR_database_password`. |
+| `database_name` | `string` | `invoice` | Nombre de la base. |
+| `database_username` | `string` | `invoice` | Usuario de la base. |
+| `vpc_cidr` | `string` | `10.0.0.0/16` | CIDR de la VPC. |
+| `availability_zones` | `list(string)` | `[us-east-1a, us-east-1b]` | Zonas de las subnets. |
+| `public_subnet_cidrs` | `list(string)` | `[10.0.1.0/24, 10.0.2.0/24]` | CIDR de las subnets públicas. |
+| `private_subnet_cidrs` | `list(string)` | `[10.0.11.0/24, 10.0.12.0/24]` | CIDR de las subnets privadas. |
+| `app_port` | `number` | `8000` | Puerto del contenedor. |
+| `service_desired_count` | `number` | `1` | Tasks que mantiene el service. |
+| `rds_instance_class` | `string` | `db.t4g.micro` | Clase de la instancia. |
+| `rds_allocated_storage` | `number` | `20` | Storage en GiB. |
+| `rds_engine_version` | `string` | `16` | Versión de PostgreSQL. |
 | `tags` | `map(string)` | `{}` | Tags adicionales, mergeados sobre los comunes. |
 | `container_cpu` | `number` | `256` | Unidades de CPU de Fargate. |
 | `container_memory` | `number` | `512` | Memoria de la task en MiB. |
@@ -289,45 +348,73 @@ Error: No value for required variable
 | Valores que no son secretos (región, ambiente, tags, tamaño) | `environments/*.tfvars` | Sí |
 | Secretos (passwords, connection strings) | Variable de entorno `TF_VAR_<nombre>` | No |
 
-`database_url` es el ejemplo: está marcada como `sensitive = true` y **no**
+`database_password` es el ejemplo: está marcada como `sensitive = true` y **no**
 aparece en ningún archivo commiteado. Se le pasa así:
 
 ```bash
-export TF_VAR_database_url="postgresql+psycopg://user:password@host:5432/invoice"
+export TF_VAR_database_password="una-password-que-no-sea-de-produccion"
 terraform plan -var-file=environments/prod.tfvars
 ```
 
+### Cómo llega el secreto al contenedor
+
+La contraseña **no viaja en la task definition**. El flujo es:
+
+```
+Secrets Manager (JSON con user, password, host, port, dbname)
+   │  el agente de ECS lo resuelve
+   ▼
+variable de entorno DATABASE_SECRET dentro del container
+   │  la app parsea el JSON y arma la URL
+   ▼
+postgresql+psycopg://user:password@host:port/dbname
+```
+
+La app **no conoce AWS**: no tiene SDK de AWS, no pide permisos de IAM, no
+sabe que existe un secret manager. Solo lee una variable de entorno y parsea un
+JSON. Eso es el patrón "la plataforma resuelve el secreto" y es el que conviene
+cuando corrés dentro de ECS.
+
+El patrón alternativo —que la app sea cliente de Secrets Manager— tiene sentido
+cuando el secreto tiene que rotar sin reiniciar el container, o cuando la app
+corre fuera de ECS (Lambda, EC2, Kubernetes).
+
 > **Limitación conocida de Terraform:** los valores de variables se guardan en el
 > state file **en texto plano**, aunque estén marcados como `sensitive`. Por eso
-> un proyecto real debería leer el secreto desde **Secrets Manager** dentro de la
-> task definition, en vez de pasarlo como variable. Está anotado en
-> `variables.tf` y es una de las limitaciones que más se preguntan en una
-> entrevista sobre IaC.
+> el secreto se construye acá desde una variable, y eso mete la contraseña en el
+> state. En un proyecto real el secret se crea **fuera** de Terraform (a mano o
+> con un pipeline de bootstrap) y Terraform solo referencia su ARN, así el state
+> nunca tiene la contraseña. Está anotado en `secrets.tf`.
 
 ## 7. Riesgo de costo
 
-Aplicar esta configuración crea recursos que **se facturan**. No es un
-desequilibrio de centavos, pero tampoco es un negocio: el mayor costo real de
-una API en AWS casi nunca está en el ECR ni en los logs, está en la red.
+Aplicar esta configuración crea recursos que **se facturan**. Y ahora la
+configuración es completa: **no son centavos**. El costo real de una API en AWS
+casi nunca está en la imagen ni en los logs: está en la red y en la base.
 
 | Recurso | ¿Cuesta dinero? | Costo aproximado |
 |---|---|---|
-| `aws_ecr_repository` | Solo si se guardan imágenes | Almacenamiento: **~USD 0.10 por GB-mes**. Una imagen de la API ronda los 150–250 MB, así que el costo real es de centavos. |
-| `aws_ecr_lifecycle_policy` | No | Sin costo. Solo define reglas de expiración (que además **reducen** el costo de almacenamiento). |
-| `aws_ecs_cluster` | No | Sin costo por el cluster en sí. |
-| `aws_ecs_task_definition` | No | Registrar una task definition no se cobra. Solo se cobra cuando **corre** una task. |
-| `aws_iam_role` + `aws_iam_role_policy` | No | Los roles IAM y las policies son gratuitos. |
-| `aws_cloudwatch_log_group` | Solo por lo almacenado | Ingestión ~**USD 0.50 por GB** + retención ~**USD 0.03 por GB-mes**. Con retención de 14 días el costo es mínimo. |
-| **Fargate (task en ejecución)** | **Sí, de forma continua** | ~**USD 0.04048 por vCPU-hora** y ~**USD 0.004445 por GB-hora**. Con 256 vCPU y 512 MiB: **~USD 0.012 por hora**, ~**USD 8.80 por mes** corriendo 24/7. **Una task que no corre no se cobra.** |
-| VPC / subnets / NAT Gateway | **No incluidos** | Deliberadamente excluidos: el NAT Gateway cuesta ~**USD 32 por mes** más el tráfico, y un ALB ~**USD 16 por mes** más LCUs. Son las fuentes de costos sorpresa. |
-| RDS / PostgreSQL | **No incluido** | Una instancia `db.t4g.micro` en Single-AZ cuesta ~**USD 15 por mes**. |
+| **NAT Gateway** | **Sí, de forma continua** | **~USD 32 por mes** más el tráfico. Es el recurso más caro de toda la configuración. |
+| **ALB** | **Sí, de forma continua** | **~USD 16 por mes** más las LCUs. |
+| **RDS `db.t4g.micro`** | **Sí, de forma continua** | **~USD 15 por mes** en Single-AZ. |
+| **Fargate (task en ejecución)** | **Sí, de forma continua** | ~**USD 0.012 por hora** con 256 vCPU y 512 MiB: **~USD 8.80 por mes** corriendo 24/7. **Una task que no corre no se cobra.** |
+| ECR | Solo si se guardan imágenes | Almacenamiento: **~USD 0.10 por GB-mes**. Una imagen ronda los 150–250 MB, o sea centavos. |
+| CloudWatch Logs | Solo por lo almacenado | Ingestión ~**USD 0.50 por GB** + retención ~**USD 0.03 por GB-mes**. |
+| VPC, subnets, IGW, route tables, security groups | No | Los recursos de red en sí son gratuitos. |
+| ECS cluster, task definitions, IAM roles, Secrets Manager | No | Registrar definiciones y roles no se cobra. |
+
+**Total estimado con el stack completo corriendo 24/7: ~USD 72 por mes**
+(~USD 32 NAT + ~USD 16 ALB + ~USD 15 RDS + ~USD 8.80 Fargate + centavos de
+logs e imágenes).
 
 Puntos de control:
 
-- Con esta configuración, **aplicarla y no correr ninguna task** cuesta
-  centavos (unos pocos centavos de imágenes + logs). El riesgo financiero
-  relevante aparece recién cuando se levanta una task de Fargate de forma
-  continua o cuando se agrega una VPC con NAT Gateway.
+- **Aplicarla y no correr nada** cuesta algunos centavos (imágenes y logs), pero
+  el NAT Gateway, el ALB y el RDS **se facturan aunque no los uses**. Apagar la
+  base o el balanceador no los elimina: hay que borrarlos.
+- El NAT Gateway es el recurso más caro y el que más se olvida. La alternativa
+  gratis son los **VPC endpoints** para ECR, S3 y CloudWatch Logs: con traffic
+  privado no hace falta salir a internet.
 - La `retention_in_days = 14` del log group acota el costo de logs.
 - El ciclo de vida de ECR expira imágenes viejas, así que el almacenamiento no
   crece sin límite.
@@ -344,7 +431,9 @@ Puntos de control:
 - `terraform apply` contra **AWS real** → **nunca ejecutado** (requiere credenciales).
   **No hay ningún recurso de AWS creado por este repositorio.**
 - `terraform apply` contra **Floci** (emulador local) → **ejecutado**: se crearon
-  los 7 recursos y una task de ECS levantó el contenedor de la API. Ver la
+  los 33 recursos, la task de migración corrió `alembic upgrade head` y la task
+  de la API levantó el container, recibió el secreto y respondió `201`, `200`,
+  `409` y `404` contra el RDS emulado. Ver la
   [sección 9](#9-practicar-localmente-con-floci).
 - No existe `backend.tf` en el repositorio. Si se corre `terraform init` de
   forma local, aparece un `terraform.tfstate` que no debe commitearse.
@@ -366,8 +455,8 @@ El emulador es un servicio del `docker-compose.yml` del proyecto, detrás de un
 profile para que no arranque con el stack normal:
 
 ```bash
-# 1. Levantar el emulador (y Postgres, que la task necesita)
-docker compose --profile aws-emulator up -d floci postgres
+# 1. Levantar el emulador
+docker compose --profile aws-emulator up -d floci
 
 # 2. Apuntar el provider de AWS al emulador
 export AWS_ENDPOINT_URL=http://localhost:4566
@@ -375,43 +464,62 @@ export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_REGION=us-east-1
 
-# 3. La base que va a ver el contenedor de la task: la IP del host en la red
-#    bridge, porque el contenedor de ECS no comparte red con el compose.
-HOST_IP=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
-export TF_VAR_database_url="postgresql+psycopg://invoice:invoice@${HOST_IP}:5433/invoice"
+# 3. La contraseña de la base, que se usa para armar el secreto
+export TF_VAR_database_password="una-password-de-prueba"
 
 # 4. Estado separado del de AWS real
 terraform init -reconfigure -backend-config="path=floci.tfstate"
 
 # 5. Aplicar
-terraform apply -auto-approve -var-file=environments/dev.tfvars
+terraform apply -auto-approve -var-file=environments/dev.tfvars -var image_tag=v1
 ```
 
 El `AWS_ENDPOINT_URL` es la clave: el provider de AWS v6 lo respeta y redirige
 todas las llamadas al emulador, sin tocar la configuración del provider.
 
-> El paso 3 importa. El estado del emulador vive en `floci.tfstate` y el de AWS
+> El paso 4 importa. El estado del emulador vive en `floci.tfstate` y el de AWS
 > real en `terraform.tfstate`. Mezclarlos hace que Terraform crea que los
 > recursos ya existen y falle con `RepositoryAlreadyExistsException`.
 
+### Publicar la imagen
+
+El repositorio ECR es **inmutable**, así que el tag tiene que cambiar en cada
+despliegue. `latest` solo sirve para el primer despliegue.
+
+```bash
+# El registry de Floci corre en el puerto 5100 del host
+docker buildx build \
+  --output type=image,name=localhost:5100/000000000000/us-east-1/invoice-api-practice-dev:v1,compression=gzip,oci-mediatypes=false,push=true \
+  .
+```
+
+Después hay que **actualizar la task definition** para que apunte al tag nuevo:
+
+```bash
+terraform apply -auto-approve -var-file=environments/dev.tfvars -var image_tag=v1
+```
+
+### El orden del despliegue, en el emulador
+
+```bash
+# 1. La migración, como task de una sola ejecución
+aws ecs run-task --cluster invoice-api-practice-dev \
+  --task-definition invoice-api-practice-dev-migrate --launch-type FARGATE --count 1 \
+  --network-configuration 'awsvpcConfiguration={subnets=[...],securityGroups=[...]}'
+
+# 2. Esperar a que termine con exitCode 0
+# 3. La API
+aws ecs update-service --cluster invoice-api-practice-dev \
+  --service invoice-api-practice-dev-api --task-definition invoice-api-practice-dev
+```
+
 ### Workarounds para bugs del emulador
 
-Floci 2.1.0 tiene dos problemas que aparecen al usar el data plane de ECR. Se
+Floci 2.1.0 tiene tres problemas que aparecen al usar el data plane de ECR. Se
 documentan porque son genéricos (cualquier emulador los puede tener) y porque
 encontrarlos es parte del ejercicio.
 
-**1. El proxy de ECR no encuentra su propio registry.** Floci crea el container
-del registry y después intenta conectarlo a la red `bridge`, pero Docker ya lo
-autoconectó, así que el alias de red no se registra y el proxy responde `503`.
-Se arregla apuntando el nombre del registry a su IP dentro del contenedor de
-Floci:
-
-```bash
-REG_IP=$(docker inspect floci-ecr-registry --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
-docker exec --user root floci sh -c "echo '$REG_IP floci-ecr-registry' >> /etc/hosts"
-```
-
-**2. La ruta del registry queda mal construida.** El proxy escribe el nombre del
+**1. La ruta del registry queda mal construida.** El proxy escribe el nombre del
 repositorio con un carácter del tag pegado (`...-devatest` en vez de `...-dev`).
 El camino correcto, que se puede ver en el catálogo del registry, es
 `<cuenta>/<región>/<repositorio>`:
@@ -419,46 +527,67 @@ El camino correcto, que se puede ver en el catálogo del registry, es
 ```bash
 curl http://localhost:5100/v2/_catalog
 # {"repositories":["000000000000/us-east-1/invoice-api-practice-dev"]}
-
-docker tag invoice-api-practice-api:latest \
-  "localhost:5100/000000000000/us-east-1/invoice-api-practice-dev:latest"
-docker push "localhost:5100/000000000000/us-east-1/invoice-api-practice-dev:latest"
 ```
 
-**3. `registry:2` no entiende el formato de imagen que empuja Docker 29.** El
+Por eso la imagen se pushea **al registry directamente**, saltando el proxy.
+
+**2. `registry:2` no entiende el formato de imagen que empuja Docker 29.** El
 registry embebido es `registry:2` (2.8.3, de 2022) y su conversión a schema1
 produce manifests rotos. Se resuelve generando el manifest con el formato
-Docker clásico en vez de OCI:
+Docker clásico en vez de OCI, que es lo que hace el `--output` de `buildx` de
+arriba (`compression=gzip,oci-mediatypes=false`).
+
+**3. El registry queda huérfano si se recrea el stack.** Floci crea el
+container del registry por su cuenta. Si el stack de compose se recrea
+(`docker compose down`), ese container sobrevive atado a la red vieja y el
+proxy de ECR responde `503` para siempre. La solución es borrarlo y dejar que
+Floci lo vuelva a crear:
 
 ```bash
-docker buildx build \
-  --output type=image,name=localhost:5100/000000000000/us-east-1/invoice-api-practice-dev:latest,compression=gzip,oci-mediatypes=false,push=true \
-  .
+docker compose --profile aws-emulator down
+docker rm -f floci-ecr-registry
+docker compose --profile aws-emulator up -d floci
 ```
 
-### Correr la task
+### Verificar que la task quedó sana
 
 ```bash
-aws ecs run-task \
-  --cluster invoice-api-practice-dev \
-  --task-definition invoice-api-practice-dev:1 \
-  --launch-type FARGATE \
-  --count 1 \
-  --network-configuration 'awsvpcConfiguration={subnets=[subnet-default-us-east-1-a],securityGroups=[sg-default]}'
+aws ecs list-tasks --cluster invoice-api-practice-dev --service-name invoice-api-practice-dev-api
+docker ps | grep floci-ecs
 ```
 
 Floci lanza un contenedor Docker real con la imagen del ECR. El contenedor
 arranca la API con Uvicorn, queda `healthy` (el `HEALTHCHECK` del `Dockerfile`
 le pega a `/health`) y sirve requests HTTP.
 
-> La base de datos tiene que ser alcanzable desde el contenedor: el `DATABASE_URL`
-> apunta a la IP del host en la red bridge, no al nombre `postgres` de un
-> compose. Si el `HEALTHCHECK` devuelve `degraded`, la base no está a mano.
+> **El detalle que solo aparece al probar de verdad:** `/health` hace `SELECT 1`,
+> que funciona aunque **la tabla no exista**. El health check puede estar en
+> verde mientras la API devuelve `500` al crear una factura. Por eso el
+> despliegue tiene un paso aparte de migración: si te saltás ese paso, la
+> infraestructura se ve perfecta y la aplicación está rota.
 >
-> Un detalle que aparece solo al probar de verdad: `/health` hace `SELECT 1`, que
-> funciona aunque **la tabla no exista**. El health check puede estar en verde
-> mientras la API devuelve `500` al crear una factura. El esquema hay que
-> aplicarlo: `uv run alembic upgrade head`.
+> En el emulador, el RDS corre como un Postgres real y la task lo alcanza por
+> la red del compose. En AWS real, la task y el RDS están en la VPC.
+
+### Lo que el emulador NO puede verificar
+
+El proxy del ALB de Floci responde, pero **no reenvía el tráfico** al target
+group: devuelve un 404 de Apache. Y la red emulada no implementa routing de
+subnets ni NAT de verdad.
+
+Lo que **sí** quedó verificado contra el emulador:
+
+- Los 33 recursos se crean y el state los trackea.
+- El backend remoto S3 + DynamoDB funciona (init, apply, state en el bucket).
+- La task de migración corre `alembic upgrade head` y sale con código 0.
+- La task de la API levanta el container, recibe `DATABASE_SECRET` resuelto,
+  se conecta al RDS y responde `201`, `200`, `409` y `404`.
+
+Lo que **no** se pudo verificar:
+
+- Que el tráfico llegue a través del ALB (el proxy del emulador no reenvía).
+- El comportamiento real de la VPC: NAT, rutas y security groups existen como
+  recursos, pero el emulador no simula el filtrado de paquetes.
 
 ### Volver al estado de AWS real
 
