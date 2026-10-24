@@ -66,7 +66,7 @@ jobs:
         run: uv run pytest --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=80
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: coverage-report
           path: coverage.xml
@@ -108,7 +108,7 @@ jobs:
         working-directory: infra/terraform
     steps:
       - uses: actions/checkout@v5
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@v4
         with:
           terraform_version: 1.16.2
       - name: Terraform fmt check
