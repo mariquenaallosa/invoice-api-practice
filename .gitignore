@@ -16,3 +16,8 @@ htmlcov/
 *.tfstate
 *.tfstate.*
 crash.log
+
+# Artefactos de proceso del orquestador: se conservan en el disco local
+# pero no forman parte del repositorio publico.
+docs/
+odd/
