@@ -1,12 +1,17 @@
 # Terraform — `invoice-api-practice` (ECR + ECS Fargate)
 
 > **Aviso importante**
-> Esta configuración **nunca fue aplicada**. El autor de este repositorio no posee
-> credenciales de AWS y jamás ejecutó `terraform apply` ni `terraform plan` contra
-> una cuenta real. La configuración se valida localmente con `terraform validate`
-> (que solo necesita el *schema* del provider, no credenciales).
-> Aplicarla crea recursos **facturables**. Consulta la [tabla de riesgo de costo](#7-riesgo-de-costo)
-> antes de hacer cualquier `apply`.
+> Esta configuración **nunca fue aplicada contra una cuenta real de AWS**. El autor
+> de este repositorio no posee credenciales de AWS y jamás ejecutó `terraform apply`
+> ni `terraform plan` contra AWS.
+>
+> Lo que **sí** se hizo fue aplicarla contra **[Floci](https://floci.io/aws/)**, un
+> emulador local de AWS que corre en Docker: los 7 recursos se crearon de verdad
+> contra una API compatible con AWS, y una task de ECS llegó a levantar el
+> contenedor de la API. Ver [Practicar localmente con Floci](#9-practicar-localmente-con-floci).
+>
+> Aplicarla contra AWS real crea recursos **facturables**. Consulta la
+> [tabla de riesgo de costo](#7-riesgo-de-costo) antes de hacer cualquier `apply`.
 
 ---
 
@@ -31,13 +36,15 @@ mostrar el flujo de trabajo de Terraform como pieza de portfolio.
 
 | Archivo | Contenido |
 |---|---|
-| `versions.tf` | Versión de Terraform y versión del provider (`hashicorp/aws ~> 6.0`). |
+| `versions.tf` | Versión de Terraform, versión del provider (`hashicorp/aws ~> 6.0`) y el bloque `backend "local"`. |
 | `providers.tf` | Configuración del provider `aws`, con `default_tags` globales. |
-| `variables.tf` | Variables de entrada (`aws_region`, `project_name`, `environment`, `tags`, `container_cpu`, `container_memory`). |
+| `variables.tf` | Variables de entrada. `environment` y `database_url` son **obligatorias y sin default**, a propósito. |
 | `locals.tf` | `name_prefix` y `common_tags`, derivados de las variables. |
 | `ecr.tf` | Repositorio ECR y su política de ciclo de vida. |
 | `ecs.tf` | Cluster ECS, rol de ejecución, log group y task definition de Fargate. |
 | `outputs.tf` | Valores de salida (URL/ARN del ECR, nombre del cluster, ARN de la task, nombre del log group). |
+| `environments/*.tfvars` | Un archivo por ambiente (`dev`, `staging`, `prod`) con los valores de cada uno. |
+| `tests/environments.tftest.hcl` | Tests de Terraform (`terraform test`), offline y sin credenciales. |
 | `backend.tf.example` | Plantilla de backend remoto S3. **No se usa automáticamente**: hay que copiarla a `backend.tf`. |
 
 ## 3. Comandos
@@ -79,21 +86,39 @@ Success! The configuration is valid.
 ### `terraform plan` (requiere credenciales)
 
 ```bash
-terraform plan
+terraform plan -var-file=environments/dev.tfvars
 ```
 
-Este comando **no se ejecutó nunca** en este repositorio: requiere credenciales
-de AWS válidas y una cuenta con permisos de escritura. En una cuenta nueva,
-`plan` muestra los recursos a crear.
+Requiere credenciales de AWS válidas y una cuenta con permisos de escritura.
+Contra AWS real **nunca se ejecutó** en este repositorio; contra el emulador
+local de la [sección 9](#9-practicar-localmente-con-floci) sí.
 
 > `terraform plan` y `terraform apply` están **desaconsejados** mientras este
 > proyecto sea un ejercicio de portfolio sin una cuenta AWS dedicada. Revisa la
 > sección 7 antes de ejecutarlos.
 
+### `terraform test` (offline, sin credenciales)
+
+```bash
+terraform test
+```
+
+Ejecuta los tests de `tests/environments.tftest.hcl`. Usan `mock_provider`, así
+que el provider de AWS es reemplazado por uno falso que **no hace ninguna
+llamada a la API**: no hay credenciales, ni cuenta, ni costo. Lo que se verifica
+es el *plan* — que cada ambiente produzca los nombres correctos y que la task
+definition pase el `DATABASE_URL` al contenedor.
+
+Salida esperada:
+
+```text
+Success! 4 passed, 0 failed.
+```
+
 ### `terraform destroy` (si llegaste a aplicar)
 
 ```bash
-terraform destroy
+terraform destroy -var-file=environments/dev.tfvars
 ```
 
 Revisa la sección 7 antes de destruir: algunos recursos (logs, imágenes
@@ -103,10 +128,24 @@ después de la eliminación.
 ## 4. Habilitar el backend remoto
 
 El estado remoto **no** está habilitado en este repositorio. `backend.tf` no
-existe a propósito, así que Terraform usa el backend local y guarda el estado en
-`terraform.tfstate`, dentro de esta misma carpeta.
+existe a propósito, así que Terraform usa el backend local declarado en
+`versions.tf`:
 
-Para activar el backend remoto (S3 + bloqueo con DynamoDB):
+```hcl
+backend "local" {
+  path = "terraform.tfstate"
+}
+```
+
+El bloque está declarado de forma explícita (en vez de usar el backend local
+implícito) por un motivo concreto: permite redirigir el estado a otro archivo
+con `terraform init -backend-config="path=..."`, que es lo que hace el emulador
+local de la [sección 9](#9-practicar-localmente-con-floci) para no mezclar su
+estado con el de una despliegue real.
+
+Para activar el backend remoto (S3 + bloqueo con DynamoDB), hay que
+**reemplazar** ese bloque por el de `backend.tf.example` (Terraform solo
+admite un bloque `backend` en toda la configuración) y luego:
 
 1. **Crear el bucket y la tabla a mano.** Este proyecto **nunca** los crea y no
    incluye código de Terraform para hacerlo: el bucket de estado debe existir
@@ -167,19 +206,65 @@ RDS/PostgreSQL, ni ninguna task en ejecución. La task definition existe, pero
 requeriría primero una red (VPC + subnets) y una base de datos, y eso ya sale
 del alcance de este ejercicio.
 
-## 6. Variables de entrada
+## 6. Variables de entrada y ambientes
 
 | Variable | Tipo | Default | Notas |
 |---|---|---|---|
 | `aws_region` | `string` | `us-east-1` | Región donde se crean los recursos. |
 | `project_name` | `string` | `invoice-api-practice` | Prefijo de los nombres de recursos. |
-| `environment` | `string` | `dev` | Validado: solo `dev`, `staging` o `prod`. |
+| `environment` | `string` | **sin default (obligatoria)** | Validado: solo `dev`, `staging` o `prod`. Ver abajo. |
+| `database_url` | `string` (sensitive) | **sin default (obligatoria)** | Connection string del contenedor. Llega por `TF_VAR_database_url`. |
 | `tags` | `map(string)` | `{}` | Tags adicionales, mergeados sobre los comunes. |
 | `container_cpu` | `number` | `256` | Unidades de CPU de Fargate. |
 | `container_memory` | `number` | `512` | Memoria de la task en MiB. |
 
 Tags comunes aplicados por `default_tags` y por cada recurso:
 `Project`, `Environment`, `ManagedBy=terraform`.
+
+### Un archivo por ambiente
+
+Los valores de cada ambiente viven en `environments/`:
+
+| Archivo | `environment` | `container_cpu` / `container_memory` | Tags |
+|---|---|---|---|
+| `environments/dev.tfvars` | `dev` | 256 / 512 | `Owner` |
+| `environments/staging.tfvars` | `staging` | 256 / 512 | `Owner`, `CostCenter` |
+| `environments/prod.tfvars` | `prod` | 512 / 1024 | `Owner`, `CostCenter`, `Compliance` |
+
+```bash
+terraform plan -var-file=environments/staging.tfvars
+```
+
+`environment` **no tiene default a propósito**. Con un default, un
+`terraform plan` sin `--var-file` apuntaría silenciosamente a `dev`, y el error
+más caro de esta configuración no es de sintaxis: es **desplegar el ambiente
+equivocado**. Al ser obligatoria, el comando falla:
+
+```text
+Error: No value for required variable
+```
+
+### La regla de los secretos
+
+| Tipo de valor | Dónde va | ¿Se commitea? |
+|---|---|---|
+| Valores que no son secretos (región, ambiente, tags, tamaño) | `environments/*.tfvars` | Sí |
+| Secretos (passwords, connection strings) | Variable de entorno `TF_VAR_<nombre>` | No |
+
+`database_url` es el ejemplo: está marcada como `sensitive = true` y **no**
+aparece en ningún archivo commiteado. Se le pasa así:
+
+```bash
+export TF_VAR_database_url="postgresql+psycopg://user:password@host:5432/invoice"
+terraform plan -var-file=environments/prod.tfvars
+```
+
+> **Limitación conocida de Terraform:** los valores de variables se guardan en el
+> state file **en texto plano**, aunque estén marcados como `sensitive`. Por eso
+> un proyecto real debería leer el secreto desde **Secrets Manager** dentro de la
+> task definition, en vez de pasarlo como variable. Está anotado en
+> `variables.tf` y es una de las limitaciones que más se preguntan en una
+> entrevista sobre IaC.
 
 ## 7. Riesgo de costo
 
@@ -216,8 +301,127 @@ Puntos de control:
 - `terraform fmt -check -recursive` → limpio.
 - `terraform init -backend=false -input=false` → correcto.
 - `terraform validate` → `Success! The configuration is valid.`
-- `terraform plan` → **nunca ejecutado** (requiere credenciales).
-- `terraform apply` → **nunca ejecutado** (requiere credenciales). **No hay
-  ningún recurso de AWS creado por este repositorio.**
+- `terraform test` → `Success! 4 passed, 0 failed.` (offline, sin credenciales).
+- `terraform plan` contra **AWS real** → **nunca ejecutado** (requiere credenciales).
+- `terraform apply` contra **AWS real** → **nunca ejecutado** (requiere credenciales).
+  **No hay ningún recurso de AWS creado por este repositorio.**
+- `terraform apply` contra **Floci** (emulador local) → **ejecutado**: se crearon
+  los 7 recursos y una task de ECS levantó el contenedor de la API. Ver la
+  [sección 9](#9-practicar-localmente-con-floci).
 - No existe `backend.tf` en el repositorio. Si se corre `terraform init` de
   forma local, aparece un `terraform.tfstate` que no debe commitearse.
+
+## 9. Practicar localmente con Floci
+
+[Floci](https://floci.io/aws/) es un emulador de AWS libre y MIT-licensed que
+corre en Docker. No es un mock: implementa las APIs de AWS de verdad, y para
+algunos servicios corre el motor real (el registry de ECR es un `registry:2`
+OCI, y ECS lanza contenedores Docker reales).
+
+Esto permite **aplicar la infraestructura completa sin cuenta de AWS y sin
+costo**, que es exactamente lo que hace falta para practicar sin abrir la
+cartera.
+
+### Puesta en marcha
+
+```bash
+# 1. Levantar el emulador
+docker run -d --name floci -p 4566:4566 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  floci/floci:latest
+
+# 2. Apuntar el provider de AWS al emulador
+export AWS_ENDPOINT_URL=http://localhost:4566
+export AWS_ACCESS_KEY_ID=test
+export AWS_SECRET_ACCESS_KEY=test
+export AWS_REGION=us-east-1
+export TF_VAR_database_url="postgresql+psycopg://invoice:invoice@host.docker.internal:5433/invoice"
+
+# 3. Estado separado del de AWS real
+terraform init -reconfigure -backend-config="path=floci.tfstate"
+
+# 4. Aplicar
+terraform apply -auto-approve -var-file=environments/dev.tfvars
+```
+
+El `AWS_ENDPOINT_URL` es la clave: el provider de AWS v6 lo respeta y redirige
+todas las llamadas al emulador, sin tocar la configuración del provider.
+
+> El paso 3 importa. El estado del emulador vive en `floci.tfstate` y el de AWS
+> real en `terraform.tfstate`. Mezclarlos hace que Terraform crea que los
+> recursos ya existen y falle con `RepositoryAlreadyExistsException`.
+
+### Workarounds para bugs del emulador
+
+Floci 2.1.0 tiene dos problemas que aparecen al usar el data plane de ECR. Se
+documentan porque son genéricos (cualquier emulador los puede tener) y porque
+encontrarlos es parte del ejercicio.
+
+**1. El proxy de ECR no encuentra su propio registry.** Floci crea el container
+del registry y después intenta conectarlo a la red `bridge`, pero Docker ya lo
+autoconectó, así que el alias de red no se registra y el proxy responde `503`.
+Se arregla apuntando el nombre del registry a su IP dentro del contenedor de
+Floci:
+
+```bash
+REG_IP=$(docker inspect floci-ecr-registry --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+docker exec --user root floci sh -c "echo '$REG_IP floci-ecr-registry' >> /etc/hosts"
+```
+
+**2. La ruta del registry queda mal construida.** El proxy escribe el nombre del
+repositorio con un carácter del tag pegado (`...-devatest` en vez de `...-dev`).
+El camino correcto, que se puede ver en el catálogo del registry, es
+`<cuenta>/<región>/<repositorio>`:
+
+```bash
+curl http://localhost:5100/v2/_catalog
+# {"repositories":["000000000000/us-east-1/invoice-api-practice-dev"]}
+
+docker tag invoice-api-practice-api:latest \
+  "localhost:5100/000000000000/us-east-1/invoice-api-practice-dev:latest"
+docker push "localhost:5100/000000000000/us-east-1/invoice-api-practice-dev:latest"
+```
+
+**3. `registry:2` no entiende el formato de imagen que empuja Docker 29.** El
+registry embebido es `registry:2` (2.8.3, de 2022) y su conversión a schema1
+produce manifests rotos. Se resuelve generando el manifest con el formato
+Docker clásico en vez de OCI:
+
+```bash
+docker buildx build \
+  --output type=image,name=localhost:5100/000000000000/us-east-1/invoice-api-practice-dev:latest,compression=gzip,oci-mediatypes=false,push=true \
+  .
+```
+
+### Correr la task
+
+```bash
+aws ecs run-task \
+  --cluster invoice-api-practice-dev \
+  --task-definition invoice-api-practice-dev:1 \
+  --launch-type FARGATE \
+  --count 1 \
+  --network-configuration 'awsvpcConfiguration={subnets=[subnet-default-us-east-1-a],securityGroups=[sg-default]}'
+```
+
+Floci lanza un contenedor Docker real con la imagen del ECR. El contenedor
+arranca la API con Uvicorn, queda `healthy` (el `HEALTHCHECK` del `Dockerfile`
+le pega a `/health`) y sirve requests HTTP.
+
+> La base de datos tiene que ser alcanzable desde el contenedor: el `DATABASE_URL`
+> apunta a la IP del host en la red bridge, no al nombre `postgres` de un
+> compose. Si el `HEALTHCHECK` devuelve `degraded`, la base no está a mano.
+>
+> Un detalle que aparece solo al probar de verdad: `/health` hace `SELECT 1`, que
+> funciona aunque **la tabla no exista**. El health check puede estar en verde
+> mientras la API devuelve `500` al crear una factura. El esquema hay que
+> aplicarlo: `uv run alembic upgrade head`.
+
+### Volver al estado de AWS real
+
+```bash
+terraform init -reconfigure
+```
+
+Esto vuelve a apuntar al backend `local` con `terraform.tfstate`. El estado del
+emulador queda en `floci.tfstate`, que también está en `.gitignore`.

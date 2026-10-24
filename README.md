@@ -97,7 +97,9 @@ Con ellos, **toda** respuesta de error tiene la misma forma:
 │   ├── conftest.py
 │   ├── unit/                    # lógica del service, sin base de datos
 │   └── integration/             # API completa contra PostgreSQL
-├── infra/terraform/             # ECR + base ECS Fargate (nunca aplicado)
+├── infra/terraform/             # ECR + base ECS Fargate, con tests offline
+│   ├── environments/            # un .tfvars por ambiente
+│   └── tests/                   # terraform test con mock_provider
 ├── docker/postgres/init/        # script que crea la base de tests
 ├── docker-compose.yml
 ├── Dockerfile
@@ -296,20 +298,26 @@ que se pueda defender cada línea.
 
 ### Es práctica de herramientas declarativas (configuración, no operación)
 
-- **`infra/terraform/`** — es una definición de infraestructura **escrita y validada,
-  nunca aplicada**. `terraform plan` y `terraform apply` no se ejecutaron jamás, no hay
-  credenciales de AWS en este repositorio y **no existe ningún recurso de AWS creado
-  por este proyecto**. Lo que se demuestra es escribir IaC correctamente y entender el
-  modelo de costos, no haber operado producción.
-- **`.github/workflows/ci.yml`** — el pipeline está escrito y sus comandos se ejecutaron
-  localmente en cada etapa, pero su primera ejecución real ocurre en el primer push.
-  Tampoco hay evidencia de haber mantenido un pipeline en producción.
+- **`infra/terraform/`** — la infraestructura **sí se aplicó**, pero **nunca contra
+  una cuenta real de AWS**. Se aplicó contra [Floci](https://floci.io/aws/), un
+  emulador local de AWS en Docker: los 7 recursos (ECR, cluster ECS, task
+  definition, IAM, log group) se crearon de verdad contra una API compatible con
+  AWS, y una task de ECS llegó a levantar el contenedor de la API y a servir
+  requests. Lo que **no** existe es una cuenta de AWS: no hay credenciales en este
+  repositorio, `terraform plan` y `terraform apply` contra AWS real nunca se
+  ejecutaron, y **no hay ningún recurso de AWS creado por este proyecto**. Lo que
+  se demuestra es escribir y probar IaC, no haber operado producción.
+- **`.github/workflows/ci.yml`** — el pipeline está escrito y sus comandos se
+  ejecutaron localmente en cada etapa, pero su primera ejecución real ocurre en el
+  primer push. Tampoco hay evidencia de haber mantenido un pipeline en producción.
 
 ### Lo que este repositorio NO es
 
 - No es un proyecto de cliente ni una herramienta en uso.
 - No hay usuarios reales, tráfico real ni datos reales.
 - No hay experiencia laboral detrás de este código. Todo es práctica deliberada.
+- No hay ningún recurso en AWS. La infraestructura se validó contra un emulador
+  local, no contra la nube.
 
 Lo que sí se puede defender: **las decisiones y sus porqués**. Que el repositorio sea
 pequeño a propósito es una decisión, no una limitación.
@@ -327,9 +335,69 @@ cd infra/terraform
 terraform init -backend=false   # descarga el provider, sin configurar backend remoto
 terraform fmt -check -recursive  # verifica el formato
 terraform validate              # valida la configuración sin tocar AWS
+terraform test                  # tests del plan, offline y sin credenciales
 ```
 
-Los tres comandos pasan en verde con el provider `hashicorp/aws` 6.70.0.
+Los cuatro comandos pasan en verde con el provider `hashicorp/aws` 6.70.0.
+
+### Un archivo de variables por ambiente
+
+Los valores de cada ambiente viven en `infra/terraform/environments/`:
+
+```bash
+terraform plan -var-file=environments/prod.tfvars
+```
+
+La variable `environment` **no tiene default a propósito**: si lo tuviera, un
+`terraform plan` sin `--var-file` apuntaría en silencio a `dev`. Al ser
+obligatoria, el comando falla y no hay forma de desplegar el ambiente
+equivocado por olvido.
+
+| Variable | Default | Sensitive |
+|---|---|---|
+| `environment` | **ninguno (obligatoria)** | no |
+| `database_url` | **ninguno (obligatoria)** | **sí** |
+| `aws_region` | `us-east-1` | no |
+| `project_name` | `invoice-api-practice` | no |
+| `container_cpu` / `container_memory` | `256` / `512` | no |
+| `tags` | `{}` | no |
+
+La regla de los secretos: **los `.tfvars` versionados llevan valores que no son
+secretos; los secretos llegan por variable de entorno** (`TF_VAR_database_url`).
+Limitación conocida y citada en el README de infra: Terraform guarda los
+valores de variables en el state file **en texto plano**, aunque estén marcados
+como `sensitive`; por eso un proyecto real debería leerlos de Secrets Manager.
+
+### Probar la infraestructura sin credenciales
+
+`terraform test` corre los tests de `infra/terraform/tests/`. Usan
+`mock_provider`, que reemplaza el provider de AWS por uno falso que **no hace
+ninguna llamada a la API**: sin credenciales, sin cuenta y sin costo. Lo que se
+verifica es el plan — que cada ambiente produzca los nombres correctos y que la
+task definition pase el `DATABASE_URL` al contenedor.
+
+### Practicar localmente con Floci
+
+[Floci](https://floci.io/aws/) es un emulador de AWS libre que corre en Docker.
+Implementa las APIs de AWS de verdad: el registry de ECR es un `registry:2` OCI
+real y ECS lanza contenedores Docker reales.
+
+```bash
+docker run -d --name floci -p 4566:4566 \
+  -v /var/run/docker.sock:/var/run/docker.sock floci/floci:latest
+
+export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
+export TF_VAR_database_url="postgresql+psycopg://invoice:invoice@<ip-del-host>:5433/invoice"
+
+cd infra/terraform
+terraform init -reconfigure -backend-config="path=floci.tfstate"
+terraform apply -auto-approve -var-file=environments/dev.tfvars
+```
+
+Con esto se crean los 7 recursos, se pushea la imagen al ECR y la task levanta
+el contenedor de la API. El detalle completo —incluidos los tres workarounds
+necesarios por bugs del emulador— está en
+[`infra/terraform/README.md`](infra/terraform/README.md).
 
 ### Qué define esta configuración
 
@@ -353,7 +421,9 @@ documentados como el siguiente paso.
 El estado de Terraform se guarda en un bucket S3, con una tabla DynamoDB para
 serializar los locks. **Este proyecto no crea ese bucket ni esa tabla.** El archivo
 `backend.tf.example` tiene la configuración lista; para activarlo hay que crear el
-bucket y la tabla a mano, renombrar el archivo a `backend.tf` y correr `terraform init`.
+bucket y la tabla a mano, **reemplazar** el bloque `backend "local"` de
+`versions.tf` por el del ejemplo (Terraform solo admite un bloque `backend`) y
+correr `terraform init`.
 
 ### Riesgo de costo
 
@@ -403,6 +473,10 @@ Cada pregunta apunta a una decisión concreta de este repositorio.
 18. ¿Qué es Terraform y qué problema resuelve?
 19. ¿Por qué no hay un ALB en esta configuración? ¿Cuánto costaría?
 20. ¿Qué es un estado de Terraform y dónde debería vivir?
+21. ¿Cómo evitás que alguien despliegue en `dev` cuando cree que va a `prod`?
+22. ¿Dónde van los secretos en Terraform? ¿Qué pasa con el state file?
+23. ¿Cómo testearías infraestructura sin gastar plata ni pedir credenciales?
+24. ¿Qué es un emulador de AWS y en qué se diferencia de un mock?
 
 ---
 
@@ -416,7 +490,11 @@ independientes:
 | `lint` | `ruff check` y `ruff format --check`. |
 | `test` | PostgreSQL como servicio, `alembic upgrade head` y `pytest` con el gate de cobertura del 80%. |
 | `docker` | Construye la imagen **y levanta el stack completo** para comprobar que la API responde. |
-| `terraform` | `terraform fmt -check`, `init -backend=false` y `validate`. |
+| `terraform` | `terraform fmt -check`, `init -backend=false`, `validate`, `terraform test` (plan offline con provider simulado) y la validación de cada `environments/*.tfvars`. |
+
+Los tres primeros comandos de Terraform no requieren credenciales: `validate`
+solo necesita el *schema* del provider y `test` usa `mock_provider`, que no
+hace ninguna llamada a la API.
 
 ---
 
