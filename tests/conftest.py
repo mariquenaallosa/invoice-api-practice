@@ -45,10 +45,15 @@ def db_session() -> Generator[Session, None, None]:
 
     Every statement runs inside that outer transaction, so whatever the test
     commits is rolled back when the test ends and tests stay isolated.
+
+    `join_transaction_mode="create_savepoint"` makes the session join the
+    outer transaction through a savepoint. That mirrors production behaviour:
+    a `session.rollback()` inside the repository only discards the work of the
+    failing statement instead of tearing down the whole transaction.
     """
     connection = engine.connect()
     transaction = connection.begin()
-    session = Session(bind=connection)
+    session = Session(bind=connection, join_transaction_mode="create_savepoint")
     try:
         yield session
     finally:

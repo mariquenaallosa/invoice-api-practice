@@ -1,4 +1,13 @@
+from datetime import date
+from decimal import Decimal
+
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.models.invoice import Invoice, InvoiceStatus
+from app.repositories.invoice import InvoiceRepository
 
 VALID_PAYLOAD = {
     "invoice_number": "INV-001",
@@ -129,3 +138,43 @@ def test_invoices_created_by_previous_tests_are_rolled_back(client: TestClient) 
     listing = client.get("/invoices", params={"limit": 100})
 
     assert listing.json()["total"] == 1
+
+
+def build_invoice(invoice_number: str) -> Invoice:
+    return Invoice(
+        invoice_number=invoice_number,
+        customer_name="Ada Lovelace",
+        customer_email="ada@example.com",
+        amount=Decimal("1250.50"),
+        currency="USD",
+        status=InvoiceStatus.ISSUED,
+        issued_at=date(2026, 1, 15),
+    )
+
+
+def test_unique_constraint_is_enforced_by_the_database(db_session: Session) -> None:
+    """The database rejects the duplicate and the repository rolls the session back."""
+    repository = InvoiceRepository(db_session)
+    repository.create(build_invoice("INV-DUP"))
+
+    with pytest.raises(IntegrityError):
+        repository.create(build_invoice("INV-DUP"))
+
+    # The failed transaction was rolled back, so the session is still usable.
+    assert repository.count() == 1
+
+
+def test_create_invoice_returns_409_when_the_database_rejects_the_insert(
+    client: TestClient, monkeypatch
+) -> None:
+    """The service pre-check is not the only guard: the unique constraint is the real one."""
+
+    def raise_integrity_error(self, invoice: Invoice) -> Invoice:
+        raise IntegrityError("INSERT", {}, Exception("duplicate key value violates unique"))
+
+    monkeypatch.setattr(InvoiceRepository, "create", raise_integrity_error)
+
+    response = client.post("/invoices", json=VALID_PAYLOAD)
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "invoice_duplicate"
