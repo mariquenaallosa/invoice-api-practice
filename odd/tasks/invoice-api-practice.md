@@ -86,10 +86,10 @@ El usuario está en una etapa de capacitación (`~/Documentos/capacitaciones/`) 
 
 | Task | Estado | Commit | Notas |
 |---|---|---|---|
-| T1 | done | `docs: add design spec and implementation plan` | |
-| T2 | pending | | |
-| T3 | pending | | |
-| T4 | pending | | |
+| T1 | done | `d1c3893` | Spec + plan |
+| T2 | done | `5fa4b4c`, `94d033d` | Bug del enum `ISSUED`/`issued` corregido antes de migrar. Python pineado a 3.12 con `.python-version` (uv elegía 3.13). |
+| T3 | done | `418ff25` | **Bug del plan corregido**: `Annotated[Decimal, condecimal(...)]` anidado descartaba TODAS las constraints en silencio. Verificado empíricamente. El repository ahora hace rollback en IntegrityError. |
+| T4 | done | pendiente | Routers + `main.py` + handlers globales + `/health`. 28 tests verdes, 95% cobertura. Dos bugs de CI encontrados: `httpx2` faltaba en dev extras (Starlette 1.9 lo exige) y `alembic/env.py` pisaba la URL del conftest → ahora solo usa settings si no le pasan ninguna. |
 | T5 | pending | | |
 | T6 | pending | | |
 | T7 | pending | | |

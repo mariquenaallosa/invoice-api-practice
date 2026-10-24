@@ -500,13 +500,15 @@ class DuplicateInvoiceError(AppError):
 ```python
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, condecimal
 
 from app.models.invoice import InvoiceStatus
 
-Amount = Annotated[Decimal, condecimal(gt=0, max_digits=12, decimal_places=2)]
+# `condecimal` already returns an Annotated type. Wrapping it in another
+# `Annotated[Decimal, ...]` nests the metadata instead of merging it, and
+# Pydantic v2 then silently ignores every constraint.
+Amount = condecimal(gt=0, max_digits=12, decimal_places=2)
 
 
 class InvoiceCreate(BaseModel):
@@ -552,6 +554,7 @@ class InvoiceList(BaseModel):
 
 ```python
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.invoice import Invoice
@@ -565,7 +568,11 @@ class InvoiceRepository:
 
     def create(self, invoice: Invoice) -> Invoice:
         self.session.add(invoice)
-        self.session.commit()
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            raise
         self.session.refresh(invoice)
         return invoice
 
@@ -641,7 +648,7 @@ from app.repositories.invoice import InvoiceRepository
 from app.services.invoice import InvoiceService
 
 
-def get_invoice_service(session: Session = Depends(get_db)) -> InvoiceService:
+def get_invoice_service(session: Session = Depends(get_db)) -> InvoiceService:  # noqa: B008
     """Build the invoice service for a request."""
     return InvoiceService(InvoiceRepository(session))
 ```
@@ -679,32 +686,53 @@ git commit -m "feat: add invoice schemas, repository, service and domain errors"
 
 ```python
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 
 TEST_DATABASE_URL = settings.test_database_url
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 engine = create_engine(TEST_DATABASE_URL, pool_pre_ping=True, future=True)
+
+
+def upgrade_test_database() -> None:
+    """Apply the Alembic migrations to the test database.
+
+    Alembic is the only source of truth for the schema: the test database is
+    migrated exactly like the application database instead of being built from
+    the SQLAlchemy metadata.
+    """
+    config = Config()
+    config.set_main_option("script_location", str(PROJECT_ROOT / "alembic"))
+    config.set_main_option("sqlalchemy.url", TEST_DATABASE_URL.replace("%", "%%"))
+    command.upgrade(config, "head")
 
 
 @pytest.fixture(scope="session", autouse=True)
 def prepare_database() -> Generator[None, None, None]:
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
+    upgrade_test_database()
     yield
     engine.dispose()
 
 
 @pytest.fixture
 def db_session() -> Generator[Session, None, None]:
+    """Session bound to a connection wrapped in an outer transaction.
+
+    Every statement runs inside that outer transaction, so whatever the test
+    commits is rolled back when the test ends and tests stay isolated.
+    """
     connection = engine.connect()
     transaction = connection.begin()
     session = Session(bind=connection)
@@ -728,9 +756,16 @@ def client(db_session: Session) -> Generator[TestClient, None, None]:
 
 
 @pytest.fixture
-def db_is_alive() -> bool:
-    with engine.connect() as connection:
-        return connection.execute(text("SELECT 1")).scalar_one() == 1
+def client_raising(db_session: Session) -> Generator[TestClient, None, None]:
+    """Test client that turns unhandled exceptions into HTTP responses."""
+
+    def override_get_db() -> Generator[Session, None, None]:
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_get_db
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
+    app.dependency_overrides.clear()
 ```
 
 - [ ] **Step 2: Escribir los tests de health**

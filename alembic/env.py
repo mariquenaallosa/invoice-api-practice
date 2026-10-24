@@ -15,10 +15,17 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # The database URL comes from the application settings so that migrations and
-# the application always point at the same database.
-config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
+# the application always point at the same database. A URL provided by the
+# caller (for example the test suite pointing at the test database) wins.
+if not config.get_main_option("sqlalchemy.url"):
+    config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
 
 target_metadata = Base.metadata
+
+
+def get_url() -> str:
+    """Return the database URL the migrations must run against."""
+    return config.get_main_option("sqlalchemy.url") or settings.database_url
 
 
 def run_migrations_offline() -> None:
@@ -28,7 +35,7 @@ def run_migrations_offline() -> None:
     context.execute() here emit the given string to the script output.
     """
     context.configure(
-        url=settings.database_url,
+        url=get_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},

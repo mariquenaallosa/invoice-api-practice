@@ -20,6 +20,8 @@ dev = [
     "pytest>=8.3.0",
     "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
+    # Starlette >= 1.9 requires httpx2 for fastapi.testclient.
+    "httpx2>=2.16.0",
 ]
 
 [build-system]
