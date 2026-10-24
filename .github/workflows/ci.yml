@@ -129,18 +129,21 @@ jobs:
         run: terraform test
       - name: Check the environment tfvars files
         run: |
-          echo 'var.environment' > "${RUNNER_TEMP}/tfvars-probe.txt"
+          declared=$(grep -oE '^variable "[a-z_]+"' variables.tf | sed 's/variable "//; s/"//' | sort -u)
           for environment in dev staging prod; do
             file="environments/${environment}.tfvars"
-            output=$(timeout 60 terraform console -var-file="$file" < "${RUNNER_TEMP}/tfvars-probe.txt" 2>&1) || {
-              echo "$output"
-              echo "::error::$file is not a valid variable file"
-              exit 1
-            }
-            if echo "$output" | grep -q "Warning"; then
-              echo "$output"
-              echo "::error::$file declares variables that the module does not know"
-              exit 1
-            fi
-            echo "$file -> $output"
+
+            # Every key must be a variable the module declares. `terraform fmt`
+            # already validates the syntax of the file; this catches the typos
+            # that a formatter cannot see.
+            for key in $(grep -oE '^[a-z_]+' "$file" | sort -u); do
+              if ! echo "$declared" | grep -qx "$key"; then
+                echo "::error::$file sets '$key', which is not a declared variable"
+                exit 1
+              fi
+            done
+
+            # Terraform itself has to accept the file and plan with it.
+            terraform test -var-file="$file" > /dev/null
+            echo "$file -> ok"
           done
