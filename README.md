@@ -78,14 +78,15 @@ Con ellos, **toda** respuesta de error tiene la misma forma:
 
 ```
 .
-├── app/
+├── app/                          # la aplicación
 │   ├── main.py                  # fábrica de la app, routers, handlers de error
 │   ├── api/
 │   │   ├── deps.py              # get_db, get_invoice_service
 │   │   └── routes/              # health.py, invoices.py
 │   ├── core/
 │   │   ├── config.py            # Settings (pydantic-settings)
-│   │   └── errors.py            # AppError y sus subclases
+│   │   ├── errors.py            # AppError y sus subclases
+│   │   └── secrets.py           # resolución del secreto de la base
 │   ├── db/
 │   │   ├── base.py              # Base declarativo
 │   │   └── session.py           # engine, SessionLocal, get_db
@@ -96,16 +97,31 @@ Con ellos, **toda** respuesta de error tiene la misma forma:
 ├── alembic/                     # migraciones
 ├── tests/
 │   ├── conftest.py
-│   ├── unit/                    # lógica del service, sin base de datos
+│   ├── unit/                    # sin base de datos
 │   └── integration/             # API completa contra PostgreSQL
-├── infra/terraform/             # ECR + base ECS Fargate, con tests offline
+├── infra/terraform/             # la infraestructura en AWS
 │   ├── environments/            # un .tfvars por ambiente
 │   └── tests/                   # terraform test con mock_provider
+├── docs/
+│   ├── README.md                # índice de la documentación
+│   └── terraform-guide.md       # guía de Terraform (qué es y cómo es en prod)
 ├── docker/postgres/init/        # script que crea la base de tests
+├── .github/workflows/ci.yml
 ├── docker-compose.yml
 ├── Dockerfile
-├── .github/workflows/ci.yml
-└── pyproject.toml
+├── Makefile                     # los comandos frecuentes, en un solo lugar
+├── pyproject.toml
+└── README.md
+```
+
+Los comandos más usados están en el `Makefile`: `make help` los lista.
+
+```bash
+make install     # dependencias
+make up          # base de datos + migraciones
+make test        # toda la suite
+make check       # lint + tests + validación de Terraform
+make emulator    # el emulador de AWS local
 ```
 
 ### Endpoints
@@ -213,7 +229,7 @@ La cobertura se mide solo sobre `app/`. El umbral está configurado en
 addopts = "--cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=80"
 ```
 
-Estado actual: **39 tests, 100% de cobertura** sobre `app/`.
+Estado actual: **51 tests, 100% de cobertura** sobre `app/`.
 
 ### Qué se testea y cómo
 
@@ -294,7 +310,7 @@ que se pueda defender cada línea.
 ### Es práctica personal (código escrito desde cero)
 
 - Toda la aplicación: modelos, schemas, repository, service, routers, handlers.
-- La suite de tests (39 tests) y la decisión de probar contra PostgreSQL real.
+- La suite de tests (51 tests) y la decisión de probar contra PostgreSQL real.
 - El `Dockerfile` multi-stage, el `docker-compose.yml` y el script de inicialización.
 - La normalización de `invoice_number`, el formato único de error, el contrato de
   `/health`.
@@ -331,200 +347,46 @@ pequeño a propósito es una decisión, no una limitación.
 
 ---
 
-## 9. Cómo funciona Terraform
+## 9. Terraform
 
-Terraform declara infraestructura como código: se describe el estado deseado y la
-herramienta calcula los cambios necesarios.
+La infraestructura completa de la API en AWS: VPC con subnets públicas y
+privadas, NAT Gateway, security groups, ALB, ECR, ECS (cluster, service y dos
+task definitions), RDS PostgreSQL y Secrets Manager. **33 recursos**, declarados
+en `infra/terraform/`.
 
-```bash
-cd infra/terraform
+Lo que se aplicó y lo que no, está detallado en la
+[sección de honestidad](#8-qué-es-práctica-real-y-qué-es-práctica-personal).
 
-terraform init -input=false     # descarga el provider; el backend local no toca AWS
-terraform fmt -check -recursive  # verifica el formato
-terraform validate              # valida la configuración sin tocar AWS
-terraform test                  # tests del plan, offline y sin credenciales
-```
+### Lo esencial para entenderla
 
-Los cuatro comandos pasan en verde con el provider `hashicorp/aws` 6.70.0.
+- **La contraseña no viaja en la task definition.** El agente de ECS resuelve el
+  secreto de Secrets Manager y lo inyecta como variable de entorno. La app no
+  conoce AWS: no tiene SDK, no pide permisos de IAM. La resolución vive en
+  `app/core/secrets.py`, en una función pura que se testea sin mocks.
+- **Un archivo de variables por ambiente** (`environments/*.tfvars`), con
+  `environment` **sin default**: un `plan` sin `--var-file` falla en vez de
+  apuntar en silencio a `dev`.
+- **La migración es una task aparte**, no parte del arranque de la API: con tres
+  réplicas, el entrypoint correría tres migraciones concurrentes.
+- **El tag de imagen es explícito** (`image_tag`), porque el repo ECR es
+  inmutable y un tag reusado sería rechazado.
+- **`terraform test`** corre tests del plan con `mock_provider`: sin
+  credenciales, sin cuenta y sin costo.
 
-### Un archivo de variables por ambiente
+### Dónde está cada cosa
 
-Los valores de cada ambiente viven en `infra/terraform/environments/`:
-
-```bash
-terraform plan -var-file=environments/prod.tfvars
-```
-
-La variable `environment` **no tiene default a propósito**: si lo tuviera, un
-`terraform plan` sin `--var-file` apuntaría en silencio a `dev`. Al ser
-obligatoria, el comando falla y no hay forma de desplegar el ambiente
-equivocado por olvido.
-
-| Variable | Default | Sensitive |
-|---|---|---|
-| `environment` | **ninguno (obligatoria)** | no |
-| `database_password` | **ninguno (obligatoria)** | **sí** |
-| `image_tag` | `latest` | no |
-| `aws_region` | `us-east-1` | no |
-| `project_name` | `invoice-api-practice` | no |
-| `container_cpu` / `container_memory` | `256` / `512` | no |
-| `rds_instance_class` / `rds_allocated_storage` | `db.t4g.micro` / `20` | no |
-| `tags` | `{}` | no |
-
-La regla de los secretos: **los `.tfvars` versionados llevan valores que no son
-secretos; los secretos llegan por variable de entorno**
-(`TF_VAR_database_password`). Limitación conocida y citada en el README de
-infra: Terraform guarda los valores de variables en el state file **en texto
-plano**, aunque estén marcados como `sensitive`; por eso un proyecto real
-crearía el secreto fuera de Terraform y solo referenciaría su ARN.
-
-### Probar la infraestructura sin credenciales
-
-`terraform test` corre los tests de `infra/terraform/tests/`. Usan
-`mock_provider`, que reemplaza el provider de AWS por uno falso que **no hace
-ninguna llamada a la API**: sin credenciales, sin cuenta y sin costo. Lo que se
-verifica es el plan — que cada ambiente produzca los nombres correctos, que la
-base no sea accesible desde internet y que **la contraseña no aparezca en la task
-definition**.
-
-### Practicar localmente con Floci
-
-[Floci](https://floci.io/aws/) es un emulador de AWS libre que corre en Docker.
-Implementa las APIs de AWS de verdad: el registry de ECR es un `registry:2` OCI
-real, ECS lanza contenedores Docker reales y RDS corre un PostgreSQL real.
-
-```bash
-docker compose --profile aws-emulator up -d floci
-
-export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
-export TF_VAR_database_password="una-password-de-prueba"
-
-cd infra/terraform
-terraform init -reconfigure -backend-config="path=floci.tfstate"
-terraform apply -auto-approve -var-file=environments/dev.tfvars -var image_tag=v1
-```
-
-Con esto se crean los 33 recursos, se pushea la imagen al ECR, corre la task de
-migración y la API queda sirviendo contra el RDS emulado. El detalle completo
-—incluidos los tres workarounds necesarios por bugs del emulador— está en
-[`infra/terraform/README.md`](infra/terraform/README.md).
-
-### Qué define esta configuración
-
-| Capa | Recursos |
+| Quiero... | Está en... |
 |---|---|
-| **Red** | VPC, 2 subnets públicas, 2 privadas, Internet Gateway, NAT Gateway + EIP, 2 route tables, 3 security groups |
-| **Entrada** | Application Load Balancer, target group con health check en `/health`, listener HTTP |
-| **Cómputo** | ECS cluster, task definition de la API, task definition de migración, ECS service |
-| **Datos** | RDS PostgreSQL (`db.t4g.micro`, no accesible desde internet) en un DB subnet group |
-| **Secretos** | Secrets Manager con user, password, host, port y dbname de la base |
-| **Imagen** | Repositorio ECR con tags inmutables y política de ciclo de vida |
-| **Operación** | IAM role de ejecución (logs + ECR + Secrets Manager) y log group de CloudWatch |
+| Entender qué es Terraform y cómo se trabaja en producción | [`docs/terraform-guide.md`](docs/terraform-guide.md) |
+| Saber qué archivo hace qué y cuánto cuesta | [`infra/terraform/README.md`](infra/terraform/README.md) |
+| Practicar la infraestructura completa sin cuenta de AWS | [`infra/terraform/README.md` §9](infra/terraform/README.md#9-practicar-localmente-con-floci) |
 
-### Cómo llega el secreto al contenedor
+### Costo real
 
-La contraseña **no viaja en la task definition**. El agente de ECS resuelve el
-secreto de Secrets Manager y lo inyecta como variable de entorno:
-
-```
-Secrets Manager (JSON)
-   → env var DATABASE_SECRET dentro del container
-   → la app parsea el JSON y arma la URL de SQLAlchemy
-```
-
-La app **no conoce AWS**: no tiene SDK de AWS, no pide permisos de IAM, no sabe
-que existe un secret manager. Solo lee una variable de entorno. La resolución
-del secreto vive en `app/core/secrets.py`, en una función pura que se testea sin
-mocks.
-
-El detalle de diseño que más se pregunta en una entrevista: **Terraform guarda
-los valores de las variables en el state file en texto plano**, aunque estén
-marcadas como `sensitive`. Por eso un proyecto real crea el secreto **fuera** de
-Terraform y referencia solo su ARN. Acá se construye desde una variable, que es
-una simplificación documentada.
-
-### El orden del despliegue
-
-La API no arranca contra una base sin esquema. El orden correcto es:
-
-1. `terraform apply` — crea la infraestructura y registra las task definitions.
-2. Correr la **task de migración** y esperar a que salga con código 0.
-3. Mover el **service** a la task definition nueva.
-
-Migrar desde el entrypoint de la API sería un error: correría una migración por
-réplica, y con un despliegue rolling eso son varias migraciones concurrentes.
-
-### Practicar localmente con Floci
-
-[Floci](https://floci.io/aws/) es un emulador de AWS libre que corre en Docker.
-Implementa las APIs de AWS de verdad: el registry de ECR es un `registry:2` OCI
-real, ECS lanza contenedores Docker reales y RDS corre un PostgreSQL real.
-
-```bash
-docker compose --profile aws-emulator up -d floci
-
-export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
-export TF_VAR_database_password="una-password-de-prueba"
-
-cd infra/terraform
-terraform init -reconfigure -backend-config="path=floci.tfstate"
-terraform apply -auto-approve -var-file=environments/dev.tfvars -var image_tag=v1
-```
-
-Con esto se crean los 33 recursos, se pushea la imagen al ECR, corre la task de
-migración y la API queda sirviendo contra el RDS emulado. El detalle completo
-—incluidos los workarounds por bugs del emulador— está en
-[`infra/terraform/README.md`](infra/terraform/README.md).
-
-### Riesgo de costo
-
-| Recurso | Costo |
-|---|---|
-| NAT Gateway | **~USD 32/mes** — el más caro de la configuración |
-| ALB | **~USD 16/mes** |
-| RDS `db.t4g.micro` | **~USD 15/mes** |
-| Fargate (1 task 24/7) | ~USD 8.80/mes |
-| ECR + logs | centavos |
-| **Total estimado** | **~USD 72/mes** con el stack corriendo |
-
-Apagar la base o el balanceador **no los elimina**: hay que borrarlos. El NAT
-Gateway se puede reemplazar por VPC endpoints (ECR, S3, CloudWatch Logs), que
-son gratis, y es el siguiente paso natural de esta configuración.
-
-El detalle completo está en [`infra/terraform/README.md`](infra/terraform/README.md).
-
-### Lo que deliberadamente NO incluye
-
-- **VPC endpoints** para ECR, S3 y CloudWatch Logs. Son la alternativa gratuita
-  al NAT Gateway y el siguiente paso natural de esta configuración.
-- **Multi-AZ** en el RDS y en el service: una sola AZ, que es lo razonable para
-  un ejercicio.
-- **Certificados TLS** y un listener HTTPS: el ALB hoy escucha en HTTP.
-- **WAF, autoscaling y alarms**: nada de eso se puede ejercitar sin tráfico real.
-- **Backups automáticos** del RDS: el `skip_final_snapshot` es deliberado, la
-  base es descartable porque el esquema se recrea con las migraciones.
-
-### Backend remoto
-
-El estado de Terraform se guarda en un bucket S3, con una tabla DynamoDB para
-serializar los locks. **Este proyecto no crea ese bucket ni esa tabla.** El archivo
-`backend.tf.example` tiene la configuración lista; para activarlo hay que crear el
-bucket y la tabla a mano, **reemplazar** el bloque `backend "local"` de
-`versions.tf` por el del ejemplo (Terraform solo admite un bloque `backend`) y
-correr `terraform init`.
-
-### Riesgo de costo
-
-| Recurso | ¿Cuesta dinero? |
-|---|---|
-| ECR | Solo el almacenamiento: ~USD 0.10 por GB-mes. Una imagen ronda los 150–250 MB, o sea centavos. |
-| CloudWatch Logs | Solo lo almacenado: ~USD 0.50 por GB ingerido. |
-| Fargate | ~USD 0.012 por hora con 256 vCPU y 512 MiB (~USD 8.80/mes 24/7). **Una task que no corre no se cobra.** |
-| VPC / NAT / ALB / RDS | No incluidos, justamente por su costo. |
-
-El detalle completo está en [`infra/terraform/README.md`](infra/terraform/README.md).
-
----
+Con el stack completo corriendo 24/7: **~USD 72 por mes** (NAT Gateway ~32, ALB
+~16, RDS ~15, Fargate ~8.80, y centavos de logs e imágenes). Apagar la base o el
+balanceador no los elimina: hay que borrarlos. El detalle por recurso está en
+el [README de infra](infra/terraform/README.md#7-riesgo-de-costo).
 
 ## 10. Qué preguntas de entrevista permite practicar
 
