@@ -32,15 +32,21 @@ def upgrade_test_database() -> None:
     command.upgrade(config, "head")
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="session")
 def prepare_database() -> Generator[None, None, None]:
+    """Migrate the test database once per session.
+
+    It is not autouse on purpose: the unit tests never touch the database, so
+    they must not need it running. The integration tests get it through the
+    `db_session` fixture.
+    """
     upgrade_test_database()
     yield
     engine.dispose()
 
 
 @pytest.fixture
-def db_session() -> Generator[Session, None, None]:
+def db_session(prepare_database: None) -> Generator[Session, None, None]:
     """Session bound to a connection wrapped in an outer transaction.
 
     Every statement runs inside that outer transaction, so whatever the test

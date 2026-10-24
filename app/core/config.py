@@ -12,6 +12,10 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+psycopg://invoice:invoice@localhost:5433/invoice"
     test_database_url: str = "postgresql+psycopg://invoice:invoice@localhost:5433/invoice_test"
+    # Raw JSON of the database secret, injected by the platform (the ECS agent
+    # resolves it from Secrets Manager). When it is not set, `database_url` is
+    # used instead, which is what local development and the tests rely on.
+    database_secret: str | None = None
     app_env: str = "development"
     log_level: str = "INFO"
     # `NoDecode` stops pydantic-settings from parsing the raw value as JSON,

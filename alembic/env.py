@@ -4,6 +4,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from app.core.config import settings
+from app.core.secrets import resolve_database_url
 from app.db.base import Base
 from app.models import invoice  # noqa: F401  -- registers the model in Base.metadata
 
@@ -18,7 +19,7 @@ if config.config_file_name is not None:
 # the application always point at the same database. A URL provided by the
 # caller (for example the test suite pointing at the test database) wins.
 if not config.get_main_option("sqlalchemy.url"):
-    config.set_main_option("sqlalchemy.url", settings.database_url.replace("%", "%%"))
+    config.set_main_option("sqlalchemy.url", resolve_database_url(settings).replace("%", "%%"))
 
 target_metadata = Base.metadata
 
