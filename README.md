@@ -57,7 +57,8 @@ El proyecto separa estrictamente **HTTP**, **reglas de negocio** y **acceso a da
 En paralelo, dos capas transversales:
 
 - **`app/schemas/`** — Pydantic. Valida la entrada y serializa la salida.
-- **`app/core/`** — configuración (`Settings`) y errores de dominio (`AppError`).
+- **`app/core/`** — configuración (`Settings`), errores de dominio (`AppError`) y
+  resolución del secreto de la base (`secrets.py`).
 
 Y una pieza clave: **`app/main.py`** registra los handlers globales de error. Sin ellos,
 cada fallo devolvería un `{"detail": ...}` con formato distinto según dónde explotó.
@@ -263,7 +264,10 @@ En local y en Docker Compose la API escucha en el mismo puerto.
 | Multi-stage Docker, usuario no-root | Imagen simple con root | Un contenedor corriendo como root es el hallazgo más fácil de una revisión de seguridad. |
 | Sin `uvicorn[standard]` en la imagen | Extra completo en runtime | `uvicorn[standard]` trae el watcher de `--reload` y el event loop acelerado: son comodidades de desarrollo, no de producción. |
 | Servicio `migrate` como job aparte | Migrar en el entrypoint de la API | Distingue un job de una sola ejecución de un servicio de larga vida. Con N réplicas, migrar en el entrypoint corre la migración N veces. |
-| Terraform sin VPC, ALB ni NAT Gateway | Stack completo | El NAT Gateway (~USD 32/mes) y el ALB (~USD 16/mes) son las fuentes de costo sorpresa. |
+| **El secreto lo resuelve la plataforma, no la app** | Que la app sea cliente de Secrets Manager | La app no necesita SDK de AWS ni permisos de IAM: no sabe que existe un secret manager. El patrón alternativo (la app rota el secreto en caliente) se documenta en el README de infra. |
+| **Migración como task de una sola ejecución** | Migrar en el entrypoint de la API | El entrypoint corre una migración por réplica; con un despliegue rolling son varias migraciones concurrentes. |
+| **Tag de imagen explícito** (`image_tag`) | Fijar `latest` | El repo ECR es inmutable: un tag reusado sería rechazado por el registry. En un pipeline real es el SHA del commit. |
+| `environment` sin default | `environment = "dev"` por defecto | Un `plan` sin `--var-file` apuntaría en silencio a dev. El error más caro no es de sintaxis: es desplegar el ambiente equivocado. |
 | Sin prefijo `/v1` en las rutas | Versionado en el path | Mantiene el proyecto chico. Es una simplificación consciente, documentada como tal. |
 
 ### Detalles que conviene conocer
@@ -300,10 +304,13 @@ que se pueda defender cada línea.
 
 - **`infra/terraform/`** — la infraestructura **sí se aplicó**, pero **nunca contra
   una cuenta real de AWS**. Se aplicó contra [Floci](https://floci.io/aws/), un
-  emulador local de AWS en Docker: los 7 recursos (ECR, cluster ECS, task
-  definition, IAM, log group) se crearon de verdad contra una API compatible con
-  AWS, y una task de ECS llegó a levantar el contenedor de la API y a servir
-  requests. Lo que **no** existe es una cuenta de AWS: no hay credenciales en este
+  emulador local de AWS en Docker: **33 recursos** (VPC, subnets, NAT Gateway,
+  security groups, ALB, target group, listener, ECR, ECS cluster, dos task
+  definitions, un service, IAM, CloudWatch Logs, RDS y Secrets Manager). La task
+  de migración corrió `alembic upgrade head` y salió con código 0; la task de la
+  API levantó el container, recibió el secreto resuelto, se conectó al RDS y
+  respondió `201`, `200`, `409` y `404`.
+  Lo que **no** existe es una cuenta de AWS: no hay credenciales en este
   repositorio, `terraform plan` y `terraform apply` contra AWS real nunca se
   ejecutaron, y **no hay ningún recurso de AWS creado por este proyecto**. Lo que
   se demuestra es escribir y probar IaC, no haber operado producción.
@@ -356,65 +363,146 @@ equivocado por olvido.
 | Variable | Default | Sensitive |
 |---|---|---|
 | `environment` | **ninguno (obligatoria)** | no |
-| `database_url` | **ninguno (obligatoria)** | **sí** |
+| `database_password` | **ninguno (obligatoria)** | **sí** |
+| `image_tag` | `latest` | no |
 | `aws_region` | `us-east-1` | no |
 | `project_name` | `invoice-api-practice` | no |
 | `container_cpu` / `container_memory` | `256` / `512` | no |
+| `rds_instance_class` / `rds_allocated_storage` | `db.t4g.micro` / `20` | no |
 | `tags` | `{}` | no |
 
 La regla de los secretos: **los `.tfvars` versionados llevan valores que no son
-secretos; los secretos llegan por variable de entorno** (`TF_VAR_database_url`).
-Limitación conocida y citada en el README de infra: Terraform guarda los
-valores de variables en el state file **en texto plano**, aunque estén marcados
-como `sensitive`; por eso un proyecto real debería leerlos de Secrets Manager.
+secretos; los secretos llegan por variable de entorno**
+(`TF_VAR_database_password`). Limitación conocida y citada en el README de
+infra: Terraform guarda los valores de variables en el state file **en texto
+plano**, aunque estén marcados como `sensitive`; por eso un proyecto real
+crearía el secreto fuera de Terraform y solo referenciaría su ARN.
 
 ### Probar la infraestructura sin credenciales
 
 `terraform test` corre los tests de `infra/terraform/tests/`. Usan
 `mock_provider`, que reemplaza el provider de AWS por uno falso que **no hace
 ninguna llamada a la API**: sin credenciales, sin cuenta y sin costo. Lo que se
-verifica es el plan — que cada ambiente produzca los nombres correctos y que la
-task definition pase el `DATABASE_URL` al contenedor.
+verifica es el plan — que cada ambiente produzca los nombres correctos, que la
+base no sea accesible desde internet y que **la contraseña no aparezca en la task
+definition**.
 
 ### Practicar localmente con Floci
 
 [Floci](https://floci.io/aws/) es un emulador de AWS libre que corre en Docker.
 Implementa las APIs de AWS de verdad: el registry de ECR es un `registry:2` OCI
-real y ECS lanza contenedores Docker reales.
+real, ECS lanza contenedores Docker reales y RDS corre un PostgreSQL real.
 
 ```bash
-docker run -d --name floci -p 4566:4566 \
-  -v /var/run/docker.sock:/var/run/docker.sock floci/floci:latest
+docker compose --profile aws-emulator up -d floci
 
 export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
-export TF_VAR_database_url="postgresql+psycopg://invoice:invoice@<ip-del-host>:5433/invoice"
+export TF_VAR_database_password="una-password-de-prueba"
 
 cd infra/terraform
 terraform init -reconfigure -backend-config="path=floci.tfstate"
-terraform apply -auto-approve -var-file=environments/dev.tfvars
+terraform apply -auto-approve -var-file=environments/dev.tfvars -var image_tag=v1
 ```
 
-Con esto se crean los 7 recursos, se pushea la imagen al ECR y la task levanta
-el contenedor de la API. El detalle completo —incluidos los tres workarounds
-necesarios por bugs del emulador— está en
+Con esto se crean los 33 recursos, se pushea la imagen al ECR, corre la task de
+migración y la API queda sirviendo contra el RDS emulado. El detalle completo
+—incluidos los tres workarounds necesarios por bugs del emulador— está en
 [`infra/terraform/README.md`](infra/terraform/README.md).
 
 ### Qué define esta configuración
 
-| Recurso | Para qué |
+| Capa | Recursos |
 |---|---|
-| `aws_ecr_repository` + `aws_ecr_lifecycle_policy` | Repositorio de imágenes Docker, con expiración automática de imágenes viejas. |
-| `aws_ecs_cluster` | Cluster de ECS. |
-| `aws_ecs_task_definition` | Definición de la task Fargate (imagen, puerto, healthcheck, logs). |
-| `aws_iam_role` + `aws_iam_role_policy` | Rol de ejecución: puede escribir en CloudWatch Logs y leer de ECR. |
-| `aws_cloudwatch_log_group` | Logs de la aplicación, con retención de 14 días. |
+| **Red** | VPC, 2 subnets públicas, 2 privadas, Internet Gateway, NAT Gateway + EIP, 2 route tables, 3 security groups |
+| **Entrada** | Application Load Balancer, target group con health check en `/health`, listener HTTP |
+| **Cómputo** | ECS cluster, task definition de la API, task definition de migración, ECS service |
+| **Datos** | RDS PostgreSQL (`db.t4g.micro`, no accesible desde internet) en un DB subnet group |
+| **Secretos** | Secrets Manager con user, password, host, port y dbname de la base |
+| **Imagen** | Repositorio ECR con tags inmutables y política de ciclo de vida |
+| **Operación** | IAM role de ejecución (logs + ECR + Secrets Manager) y log group de CloudWatch |
+
+### Cómo llega el secreto al contenedor
+
+La contraseña **no viaja en la task definition**. El agente de ECS resuelve el
+secreto de Secrets Manager y lo inyecta como variable de entorno:
+
+```
+Secrets Manager (JSON)
+   → env var DATABASE_SECRET dentro del container
+   → la app parsea el JSON y arma la URL de SQLAlchemy
+```
+
+La app **no conoce AWS**: no tiene SDK de AWS, no pide permisos de IAM, no sabe
+que existe un secret manager. Solo lee una variable de entorno. La resolución
+del secreto vive en `app/core/secrets.py`, en una función pura que se testea sin
+mocks.
+
+El detalle de diseño que más se pregunta en una entrevista: **Terraform guarda
+los valores de las variables en el state file en texto plano**, aunque estén
+marcadas como `sensitive`. Por eso un proyecto real crea el secreto **fuera** de
+Terraform y referencia solo su ARN. Acá se construye desde una variable, que es
+una simplificación documentada.
+
+### El orden del despliegue
+
+La API no arranca contra una base sin esquema. El orden correcto es:
+
+1. `terraform apply` — crea la infraestructura y registra las task definitions.
+2. Correr la **task de migración** y esperar a que salga con código 0.
+3. Mover el **service** a la task definition nueva.
+
+Migrar desde el entrypoint de la API sería un error: correría una migración por
+réplica, y con un despliegue rolling eso son varias migraciones concurrentes.
+
+### Practicar localmente con Floci
+
+[Floci](https://floci.io/aws/) es un emulador de AWS libre que corre en Docker.
+Implementa las APIs de AWS de verdad: el registry de ECR es un `registry:2` OCI
+real, ECS lanza contenedores Docker reales y RDS corre un PostgreSQL real.
+
+```bash
+docker compose --profile aws-emulator up -d floci
+
+export AWS_ENDPOINT_URL=http://localhost:4566 AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test
+export TF_VAR_database_password="una-password-de-prueba"
+
+cd infra/terraform
+terraform init -reconfigure -backend-config="path=floci.tfstate"
+terraform apply -auto-approve -var-file=environments/dev.tfvars -var image_tag=v1
+```
+
+Con esto se crean los 33 recursos, se pushea la imagen al ECR, corre la task de
+migración y la API queda sirviendo contra el RDS emulado. El detalle completo
+—incluidos los workarounds por bugs del emulador— está en
+[`infra/terraform/README.md`](infra/terraform/README.md).
+
+### Riesgo de costo
+
+| Recurso | Costo |
+|---|---|
+| NAT Gateway | **~USD 32/mes** — el más caro de la configuración |
+| ALB | **~USD 16/mes** |
+| RDS `db.t4g.micro` | **~USD 15/mes** |
+| Fargate (1 task 24/7) | ~USD 8.80/mes |
+| ECR + logs | centavos |
+| **Total estimado** | **~USD 72/mes** con el stack corriendo |
+
+Apagar la base o el balanceador **no los elimina**: hay que borrarlos. El NAT
+Gateway se puede reemplazar por VPC endpoints (ECR, S3, CloudWatch Logs), que
+son gratis, y es el siguiente paso natural de esta configuración.
+
+El detalle completo está en [`infra/terraform/README.md`](infra/terraform/README.md).
 
 ### Lo que deliberadamente NO incluye
 
-VPC, subnets, NAT Gateway, ALB, target group, `aws_ecs_service` y RDS. No es un
-descuido: el ALB y el NAT Gateway son exactamente los recursos que hacen que una
-"API en AWS" termine costando USD 50 por mes sin que nadie lo note. Quedan
-documentados como el siguiente paso.
+- **VPC endpoints** para ECR, S3 y CloudWatch Logs. Son la alternativa gratuita
+  al NAT Gateway y el siguiente paso natural de esta configuración.
+- **Multi-AZ** en el RDS y en el service: una sola AZ, que es lo razonable para
+  un ejercicio.
+- **Certificados TLS** y un listener HTTPS: el ALB hoy escucha en HTTP.
+- **WAF, autoscaling y alarms**: nada de eso se puede ejercitar sin tráfico real.
+- **Backups automáticos** del RDS: el `skip_final_snapshot` es deliberado, la
+  base es descartable porque el esquema se recrea con las migraciones.
 
 ### Backend remoto
 
@@ -471,12 +559,16 @@ Cada pregunta apunta a una decisión concreta de este repositorio.
 
 **Infraestructura**
 18. ¿Qué es Terraform y qué problema resuelve?
-19. ¿Por qué no hay un ALB en esta configuración? ¿Cuánto costaría?
+19. ¿Por qué hay un NAT Gateway si los VPC endpoints son gratis? ¿Cuánto cuesta cada uno?
 20. ¿Qué es un estado de Terraform y dónde debería vivir?
 21. ¿Cómo evitás que alguien despliegue en `dev` cuando cree que va a `prod`?
 22. ¿Dónde van los secretos en Terraform? ¿Qué pasa con el state file?
-23. ¿Cómo testearías infraestructura sin gastar plata ni pedir credenciales?
-24. ¿Qué es un emulador de AWS y en qué se diferencia de un mock?
+23. ¿Quién debería resolver el secreto: la plataforma o la app? ¿Cuándo cambia esa respuesta?
+24. ¿Por qué la migración es una task aparte y no parte del arranque de la API?
+25. ¿Qué pasa si el repositorio de imágenes es inmutable y despliegas siempre el mismo tag?
+26. ¿Cómo testearías infraestructura sin gastar plata ni pedir credenciales?
+27. ¿Qué es un emulador de AWS y en qué se diferencia de un mock?
+28. ¿Por qué el ALB y el NAT Gateway son las fuentes de costo sorpresa? ¿Cómo los evitarías?
 
 ---
 
