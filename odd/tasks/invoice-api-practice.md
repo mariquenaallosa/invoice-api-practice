@@ -94,7 +94,8 @@ El usuario está en una etapa de capacitación (`~/Documentos/capacitaciones/`) 
 | T6 | done | `950eaa6` | Dockerfile multi-stage + compose (`postgres`/`migrate`/`api`). No-root uid 10001, sin `.env` en la imagen, 216MB → 191MB moviendo `uvicorn[standard]` a dev deps. Health validado en real: base caída → 503 degraded, base arriba → 200. `migrate` es un job one-shot con `service_completed_successfully`. |
 | T7 | done | `5b53fad` | Workflow con 4 jobs (lint/test/docker/terraform). Versiones de actions verificadas contra el registry: `astral-sh/setup-uv@v6` (¡**no existe** el tag `v10`!), `actions/checkout@v4`, `actions/setup-python` eliminado (setup-uv instala Python). Job docker hace smoke del stack completo, no solo build. |
 | T8 | done | `6970a75` | `infra/terraform/` con ECR + ECS Fargate. `fmt -check` e `init -backend=false` + `validate` en verde con provider **aws 6.70.0** (`~> 6.0`, no `~> 5.0`). Nunca se ejecutó `plan` ni `apply`. `.terraform.lock.hcl` se commitea a propósito. |
-| T9 | pending | | |
+| T9 | done | `3924acd` | README raíz en español con las 11 secciones. **Todos los comandos del README se ejecutaron y se verificaron**, lo que destapó dos bugs: `cors_origins` reventaba con `.env` (pydantic-settings parseaba el valor vacío como JSON) y el puerto 8000 choca con el `openapi/` del usuario → todo unificado en 8010. |
+| — | **done** | 11 commits | Repo limpio, 60 archivos versionados, sin secretos. Listo para push. |
 
 ## Next step
 
