@@ -102,10 +102,18 @@ jobs:
   terraform:
     name: Terraform
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: infra/terraform
+    env:
+      # The AWS provider looks for credentials in the EC2 metadata service when
+      # it finds none in the environment. GitHub runners are Azure VMs, so
+      # 169.254.169.254 answers and the provider waits on it forever. These
+      # commands never talk to AWS, so the lookup is pointless.
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
     steps:
       - uses: actions/checkout@v5
       - uses: hashicorp/setup-terraform@v4
@@ -121,9 +129,10 @@ jobs:
         run: terraform test
       - name: Check the environment tfvars files
         run: |
+          echo 'var.environment' > "${RUNNER_TEMP}/tfvars-probe.txt"
           for environment in dev staging prod; do
             file="environments/${environment}.tfvars"
-            output=$(echo 'var.environment' | terraform console -var-file="$file" 2>&1) || {
+            output=$(timeout 60 terraform console -var-file="$file" < "${RUNNER_TEMP}/tfvars-probe.txt" 2>&1) || {
               echo "$output"
               echo "::error::$file is not a valid variable file"
               exit 1
