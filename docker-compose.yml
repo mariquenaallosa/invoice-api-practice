@@ -61,7 +61,10 @@ services:
       # Lets Floci launch real Docker containers, which is what makes an ECS
       # task actually run the API image.
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./data:/app/data
+      # A named volume instead of a bind mount: the emulator writes these
+      # files with its own uid, which a bind mount would leave on the host
+      # with permissions nobody can clean up.
+      - floci-data:/app/data
     environment:
       FLOCI_STORAGE_MODE: hybrid
     healthcheck:
@@ -79,3 +82,4 @@ services:
 
 volumes:
   pgdata:
+  floci-data:
