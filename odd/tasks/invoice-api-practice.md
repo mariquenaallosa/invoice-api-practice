@@ -91,7 +91,7 @@ El usuario está en una etapa de capacitación (`~/Documentos/capacitaciones/`) 
 | T3 | done | `418ff25` | **Bug del plan corregido**: `Annotated[Decimal, condecimal(...)]` anidado descartaba TODAS las constraints en silencio. Verificado empíricamente. El repository ahora hace rollback en IntegrityError. |
 | T4 | done | `2bccfe6` | Routers + `main.py` + handlers globales + `/health`. Dos bugs de CI encontrados: `httpx2` faltaba en dev extras (Starlette 1.9 lo exige) y `alembic/env.py` pisaba la URL del conftest → ahora solo usa settings si no le pasan ninguna. |
 | T5 | done | `394fb36` | 35 tests, **100% cobertura**. Gate verificado que corta (exit 1 con umbral 90%). El harness necesitó `join_transaction_mode="create_savepoint"` para que `session.rollback()` se comportara como en producción. Smoke test real con uvicorn: 201+Location, 409, 409 normalizado, 200, 404, 422, paginado, 422 en `limit=0`, `/docs` + `/redoc` + `/openapi.json` OK. |
-| T6 | pending | | |
+| T6 | done | `950eaa6` | Dockerfile multi-stage + compose (`postgres`/`migrate`/`api`). No-root uid 10001, sin `.env` en la imagen, 216MB → 191MB moviendo `uvicorn[standard]` a dev deps. Health validado en real: base caída → 503 degraded, base arriba → 200. `migrate` es un job one-shot con `service_completed_successfully`. |
 | T7 | pending | | |
 | T8 | pending | | |
 | T9 | pending | | |
