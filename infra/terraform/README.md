@@ -45,7 +45,8 @@ mostrar el flujo de trabajo de Terraform como pieza de portfolio.
 | `outputs.tf` | Valores de salida (URL/ARN del ECR, nombre del cluster, ARN de la task, nombre del log group). |
 | `environments/*.tfvars` | Un archivo por ambiente (`dev`, `staging`, `prod`) con los valores de cada uno. |
 | `tests/environments.tftest.hcl` | Tests de Terraform (`terraform test`), offline y sin credenciales. |
-| `backend.tf.example` | Plantilla de backend remoto S3. **No se usa automáticamente**: hay que copiarla a `backend.tf`. |
+| `backend.tf.example` | Plantilla de backend remoto S3 (AWS real). **No se usa automáticamente**: hay que reemplazarla por el bloque `backend "local"` de `versions.tf`. |
+| `backend.floci.example` | La misma idea apuntando al emulador local (endpoints + credenciales falsas). |
 
 ## 3. Comandos
 
@@ -55,11 +56,17 @@ Todos los comandos se ejecutan desde `infra/terraform/`.
 
 ```bash
 cd infra/terraform
-terraform init -backend=false -input=false
+terraform init -input=false
 ```
 
-`-backend=false` fuerza el uso del backend local, así que la inicialización no
-intenta conectarse a S3 ni a DynamoDB. Es el comando que usa el pipeline de CI.
+Como el backend local está declarado de forma explícita en `versions.tf`, este
+`init` no toca S3 ni DynamoDB: solo descarga el provider y prepara el backend
+local. Es el comando que usa el pipeline de CI y **no requiere credenciales**.
+
+> Si en algún momento se activa el backend remoto (sección 4), `terraform init`
+> va a intentar conectarse a S3. En ese caso, `-backend=false` sirve para
+> inicializar sin tocar el backend remoto, pero deja el resto de comandos
+> sin poder ejecutarse.
 
 ### `terraform fmt`
 
@@ -188,6 +195,37 @@ admite un bloque `backend` en toda la configuración) y luego:
    proyecto lo mantiene fuera del repositorio; si se versiona por comodidad,
    agrega `backend.tf` a `.gitignore` antes de commitear.
 
+### Practicar el backend remoto sin AWS
+
+El mismo flujo se puede practicar entero contra el emulador local, porque
+Floci implementa S3 y DynamoDB de verdad. `backend.floci.example` tiene la
+configuración lista (con el argumento `endpoints`, que en el backend S3 actual
+es un argumento y no un bloque):
+
+```bash
+# 1. Crear el bucket y la tabla en el emulador
+aws s3 mb s3://invoice-tf-state
+aws dynamodb create-table --table-name invoice-tf-locks \
+  --attribute-definitions AttributeName=LockID,AttributeType=S \
+  --key-schema AttributeName=LockID,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+
+# 2. Usar ese backend en vez del local
+cp backend.floci.example backend.tf
+
+# 3. Inicializar y aplicar
+terraform init -input=false
+terraform apply -auto-approve -var-file=environments/dev.tfvars
+
+# 4. El estado quedó en S3, no en el disco
+aws s3 ls s3://invoice-tf-state/ --recursive
+# 2026-10-24 09:47:14  13308  invoice-api-practice/dev/terraform.tfstate
+```
+
+Esto ya está verificado: el `init` inicializa el backend contra el emulador, el
+`apply` crea los recursos y el state file termina en el bucket de S3 con la
+tabla de DynamoDB haciendo de lock.
+
 ## 5. Recursos que crea esta configuración
 
 | Recurso | Tipo Terraform | Propósito |
@@ -299,7 +337,7 @@ Puntos de control:
 ## 8. Estado actual de esta configuración
 
 - `terraform fmt -check -recursive` → limpio.
-- `terraform init -backend=false -input=false` → correcto.
+- `terraform init -input=false` → correcto.
 - `terraform validate` → `Success! The configuration is valid.`
 - `terraform test` → `Success! 4 passed, 0 failed.` (offline, sin credenciales).
 - `terraform plan` contra **AWS real** → **nunca ejecutado** (requiere credenciales).
@@ -324,23 +362,28 @@ cartera.
 
 ### Puesta en marcha
 
+El emulador es un servicio del `docker-compose.yml` del proyecto, detrás de un
+profile para que no arranque con el stack normal:
+
 ```bash
-# 1. Levantar el emulador
-docker run -d --name floci -p 4566:4566 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  floci/floci:latest
+# 1. Levantar el emulador (y Postgres, que la task necesita)
+docker compose --profile aws-emulator up -d floci postgres
 
 # 2. Apuntar el provider de AWS al emulador
 export AWS_ENDPOINT_URL=http://localhost:4566
 export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_REGION=us-east-1
-export TF_VAR_database_url="postgresql+psycopg://invoice:invoice@host.docker.internal:5433/invoice"
 
-# 3. Estado separado del de AWS real
+# 3. La base que va a ver el contenedor de la task: la IP del host en la red
+#    bridge, porque el contenedor de ECS no comparte red con el compose.
+HOST_IP=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}')
+export TF_VAR_database_url="postgresql+psycopg://invoice:invoice@${HOST_IP}:5433/invoice"
+
+# 4. Estado separado del de AWS real
 terraform init -reconfigure -backend-config="path=floci.tfstate"
 
-# 4. Aplicar
+# 5. Aplicar
 terraform apply -auto-approve -var-file=environments/dev.tfvars
 ```
 

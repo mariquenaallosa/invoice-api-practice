@@ -21,3 +21,6 @@ crash.log
 # pero no forman parte del repositorio publico.
 docs/
 odd/
+
+# Local state of the Floci emulator (optional, aws-emulator profile).
+data/

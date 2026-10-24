@@ -332,7 +332,7 @@ herramienta calcula los cambios necesarios.
 ```bash
 cd infra/terraform
 
-terraform init -backend=false   # descarga el provider, sin configurar backend remoto
+terraform init -input=false     # descarga el provider; el backend local no toca AWS
 terraform fmt -check -recursive  # verifica el formato
 terraform validate              # valida la configuración sin tocar AWS
 terraform test                  # tests del plan, offline y sin credenciales
@@ -490,7 +490,7 @@ independientes:
 | `lint` | `ruff check` y `ruff format --check`. |
 | `test` | PostgreSQL como servicio, `alembic upgrade head` y `pytest` con el gate de cobertura del 80%. |
 | `docker` | Construye la imagen **y levanta el stack completo** para comprobar que la API responde. |
-| `terraform` | `terraform fmt -check`, `init -backend=false`, `validate`, `terraform test` (plan offline con provider simulado) y la validación de cada `environments/*.tfvars`. |
+| `terraform` | `terraform fmt -check`, `init`, `validate`, `terraform test` (plan offline con provider simulado) y la validación de cada `environments/*.tfvars`. |
 
 Los tres primeros comandos de Terraform no requieren credenciales: `validate`
 solo necesita el *schema* del provider y `test` usa `mock_provider`, que no
