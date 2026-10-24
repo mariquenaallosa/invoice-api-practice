@@ -1,6 +1,8 @@
 from functools import lru_cache
+from typing import Annotated
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -12,7 +14,19 @@ class Settings(BaseSettings):
     test_database_url: str = "postgresql+psycopg://invoice:invoice@localhost:5433/invoice_test"
     app_env: str = "development"
     log_level: str = "INFO"
-    cors_origins: list[str] = []
+    # `NoDecode` stops pydantic-settings from parsing the raw value as JSON,
+    # so a comma separated list (or an empty value) can be handled below.
+    cors_origins: Annotated[list[str], NoDecode] = []
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: object) -> object:
+        """Accept a comma separated list, an empty value or an actual list."""
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
 
 
 @lru_cache

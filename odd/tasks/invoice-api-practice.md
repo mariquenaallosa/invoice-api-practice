@@ -92,8 +92,8 @@ El usuario está en una etapa de capacitación (`~/Documentos/capacitaciones/`) 
 | T4 | done | `2bccfe6` | Routers + `main.py` + handlers globales + `/health`. Dos bugs de CI encontrados: `httpx2` faltaba en dev extras (Starlette 1.9 lo exige) y `alembic/env.py` pisaba la URL del conftest → ahora solo usa settings si no le pasan ninguna. |
 | T5 | done | `394fb36` | 35 tests, **100% cobertura**. Gate verificado que corta (exit 1 con umbral 90%). El harness necesitó `join_transaction_mode="create_savepoint"` para que `session.rollback()` se comportara como en producción. Smoke test real con uvicorn: 201+Location, 409, 409 normalizado, 200, 404, 422, paginado, 422 en `limit=0`, `/docs` + `/redoc` + `/openapi.json` OK. |
 | T6 | done | `950eaa6` | Dockerfile multi-stage + compose (`postgres`/`migrate`/`api`). No-root uid 10001, sin `.env` en la imagen, 216MB → 191MB moviendo `uvicorn[standard]` a dev deps. Health validado en real: base caída → 503 degraded, base arriba → 200. `migrate` es un job one-shot con `service_completed_successfully`. |
-| T7 | pending | | |
-| T8 | pending | | |
+| T7 | done | `5b53fad` | Workflow con 4 jobs (lint/test/docker/terraform). Versiones de actions verificadas contra el registry: `astral-sh/setup-uv@v6` (¡**no existe** el tag `v10`!), `actions/checkout@v4`, `actions/setup-python` eliminado (setup-uv instala Python). Job docker hace smoke del stack completo, no solo build. |
+| T8 | done | `6970a75` | `infra/terraform/` con ECR + ECS Fargate. `fmt -check` e `init -backend=false` + `validate` en verde con provider **aws 6.70.0** (`~> 6.0`, no `~> 5.0`). Nunca se ejecutó `plan` ni `apply`. `.terraform.lock.hcl` se commitea a propósito. |
 | T9 | pending | | |
 
 ## Next step
