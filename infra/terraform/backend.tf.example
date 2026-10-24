@@ -1,0 +1,9 @@
+terraform {
+  backend "s3" {
+    bucket         = "REPLACE_ME-your-terraform-state-bucket"
+    key            = "invoice-api-practice/dev/terraform.tfstate"
+    region         = "us-east-1"
+    dynamodb_table = "REPLACE_ME-your-terraform-locks-table"
+    encrypt        = true
+  }
+}

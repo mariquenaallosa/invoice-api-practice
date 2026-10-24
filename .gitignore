@@ -9,3 +9,10 @@ coverage.xml
 htmlcov/
 *.egg-info/
 .atl/
+
+# Terraform: the provider lock file IS committed on purpose, it pins the
+# provider version. Only the downloaded plugins and the state stay out.
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
