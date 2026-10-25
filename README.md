@@ -107,6 +107,7 @@ Con ellos, **toda** respuesta de error tiene la misma forma:
 │   └── terraform-guide.md       # guía de Terraform (qué es y cómo es en prod)
 ├── docker/postgres/init/        # script que crea la base de tests
 ├── .github/workflows/ci.yml
+├── AGENTS.md                    # instrucciones para agentes de código
 ├── docker-compose.yml
 ├── Dockerfile
 ├── Makefile                     # los comandos frecuentes, en un solo lugar
@@ -124,6 +125,11 @@ make check       # lint + tests unitarios + validación de Terraform (sin base d
 make check-all   # lo mismo más los tests de integración (necesitan la base)
 make emulator    # el emulador de AWS local
 ```
+
+> Si trabajás con un agente de código (Claude Code, Codex, Cursor, Copilot),
+> [`AGENTS.md`](AGENTS.md) tiene las reglas de arquitectura, las convenciones y
+> las trampas conocidas del repositorio. Es lo primero que debería leer
+> cualquier agente antes de tocar una línea.
 
 ### Endpoints
 
