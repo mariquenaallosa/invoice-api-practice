@@ -120,7 +120,8 @@ Los comandos más usados están en el `Makefile`: `make help` los lista.
 make install     # dependencias
 make up          # base de datos + migraciones
 make test        # toda la suite
-make check       # lint + tests + validación de Terraform
+make check       # lint + tests unitarios + validación de Terraform (sin base de datos)
+make check-all   # lo mismo más los tests de integración (necesitan la base)
 make emulator    # el emulador de AWS local
 ```
 

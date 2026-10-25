@@ -13,8 +13,8 @@
 
 .DEFAULT_GOAL := help
 .PHONY: help install dev dev-down dev-logs dev-migrate \
-        staging staging-down staging-plan staging-apply staging-image staging-deploy staging-verify \
-        test test-unit test-integration coverage lint fmt check build tf-validate tf-test
+        staging staging-down staging-init staging-plan staging-apply staging-image staging-deploy staging-verify \
+        test test-unit test-integration coverage lint fmt check check-all build tf-validate tf-test
 
 help: ## Muestra esta ayuda
 	@grep -hE '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -27,6 +27,8 @@ install: ## Instala las dependencias (uv sync --extra dev)
 
 dev: ## DEVELOPMENT: levanta la base local y aplica las migraciones
 	docker compose up -d postgres
+	@echo "Esperando a que PostgreSQL este healthy..."
+	@until docker compose ps postgres --format '{{.Status}}' | grep -q healthy; do sleep 1; done
 	uv run alembic upgrade head
 	@echo ""
 	@echo "Base de datos local en localhost:5433."
@@ -102,11 +104,15 @@ lint: ## Revisa el estilo con ruff
 fmt: ## Formatea el código
 	uv run ruff format .
 
-check: ## Corre lint, tests y validación de Terraform
+check: ## Revisión rápida: lint, tests unitarios y Terraform (no necesita base de datos)
 	uv run ruff check .
 	uv run ruff format --check .
-	uv run pytest
+	uv run pytest tests/unit --no-cov
 	cd infra/terraform && terraform fmt -check -recursive && terraform validate
+
+check-all: ## Revisión completa: incluye los tests de integración (necesitan la base)
+	$(MAKE) check
+	uv run pytest
 
 build: ## Construye la imagen Docker
 	docker build -t invoice-api-practice:local .
